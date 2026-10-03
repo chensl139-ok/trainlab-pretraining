@@ -125,6 +125,24 @@ class Manager:
                 rows=db.execute("SELECT j.* FROM jobs j JOIN resource_acl a ON a.kind='job' AND a.id=j.id WHERE a.project=? ORDER BY j.created_at DESC LIMIT 100",(project,))
             return [self.decode(r) for r in rows]
 
+    def page_jobs(self, project=None, query='', status='', offset=0, limit=12):
+        join=" JOIN resource_acl a ON a.kind='job' AND a.id=j.id" if project is not None else ''
+        clauses=[];args=[]
+        if project is not None:
+            clauses.append('a.project=?');args.append(project)
+        if query:
+            # instr treats percent/underscore literally, unlike LIKE patterns.
+            clauses.append("(instr(lower(json_extract(j.config,'$.name')),lower(?))>0 OR instr(j.id,?)>0)")
+            args.extend([query,query])
+        if status:
+            clauses.append('j.status=?');args.append(status)
+        where=(' WHERE '+' AND '.join(clauses)) if clauses else ''
+        with self.db() as db:
+            db.execute('BEGIN')  # Count and page share one read snapshot.
+            total=db.execute('SELECT COUNT(*) FROM jobs j'+join+where,args).fetchone()[0]
+            rows=db.execute('SELECT j.* FROM jobs j'+join+where+' ORDER BY j.created_at DESC,j.id DESC LIMIT ? OFFSET ?',[*args,limit,offset]).fetchall()
+        return {'items':[self.decode(r) for r in rows],'total':total,'offset':offset,'limit':limit}
+
     def get(self, jid):
         with self.db() as db:
             row = db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()

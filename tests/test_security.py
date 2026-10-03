@@ -136,3 +136,50 @@ def test_json_body_is_bounded(system):
     c,k=system
     r=c.post('/api/jobs',content='x'*70000,headers=k['alice'])
     assert r.status_code==413 and r.headers['X-Request-ID']
+
+
+def test_overview_counts_only_accessible_resources(system):
+    c,k=system
+    a=upload(c,k['alice']);b=upload(c,k['bob'])
+    create(c,k['alice'],a);create(c,k['bob'],b)
+    view=c.get('/api/overview',headers=k['viewer']).json()
+    assert view['total_jobs']==1 and view['jobs']=={'queued':1}
+    assert view['dataset_count']==1 and view['dataset_bytes']>0
+    assert c.get('/api/overview',headers=k['admin']).json()['total_jobs']==2
+    assert c.get('/api/overview').status_code==401
+
+
+def test_paginated_search_is_scoped_and_literal(system):
+    c,k=system;m=c.app.state.manager;m.max_pending=100
+    did=upload(c,k['alice']);other=upload(c,k['bob'])
+    for n in range(15):
+        cfg=TrainConfig(dataset_id=did,name=f'Experiment {n:02}').model_dump()
+        assert c.post('/api/jobs',json=cfg,headers=k['alice']).status_code==200
+    create(c,k['bob'],other)
+    one=c.get('/api/jobs/page?limit=12',headers=k['viewer']).json()
+    two=c.get('/api/jobs/page?limit=12&offset=12',headers=k['viewer']).json()
+    assert one['total']==15 and len(one['items'])==12 and len(two['items'])==3
+    assert not {x['id'] for x in one['items']} & {x['id'] for x in two['items']}
+    assert c.get('/api/jobs/page?q=experiment%2001',headers=k['viewer']).json()['total']==1
+    assert c.get('/api/jobs/page?q=%25',headers=k['viewer']).json()['total']==0
+    assert c.get('/api/jobs/page?q=%27%20OR%201%3D1',headers=k['viewer']).json()['total']==0
+    assert c.get('/api/jobs/page?status=failed',headers=k['viewer']).json()['total']==0
+    assert c.get('/api/jobs/page',headers=k['bob']).json()['total']==1
+    assert c.get('/api/jobs/page?status=invalid',headers=k['alice']).status_code==422
+    assert c.get('/api/jobs/page?limit=1000',headers=k['alice']).status_code==422
+    assert c.get('/api/jobs/page?offset=-1',headers=k['alice']).status_code==422
+
+
+def test_preview_is_bounded_and_project_scoped(system):
+    c,k=system
+    data='\n'.join(json.dumps({'text':'<script>literal</script>'+str(i)+'x'*1000}) for i in range(30))
+    did=c.post('/api/datasets',content=data,headers=k['alice']).json()['id']
+    p=c.get('/api/datasets/'+did+'/preview',headers=k['viewer'])
+    assert p.status_code==200
+    assert len(p.json()['samples'])==3
+    assert all(len(s['text'])==800 and s['truncated'] for s in p.json()['samples'])
+    assert p.json()['samples'][0]['text'].startswith('<script>literal</script>')
+    assert c.get('/api/datasets/'+did+'/preview',headers=k['bob']).status_code==404
+    assert c.get('/api/datasets/invalid/preview',headers=k['admin']).status_code==404
+    (c.app.state.manager.root/'datasets'/(did+'.jsonl')).unlink()
+    assert c.get('/api/datasets/'+did+'/preview',headers=k['alice']).status_code==409

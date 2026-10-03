@@ -11,7 +11,7 @@ import anyio
 from pathlib import Path
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from server.manager import Manager, ROOT, gpu_inventory, now
@@ -114,7 +114,7 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
 
     @app.get('/api/health')
     def health():
-        return {'service':'trainlab-pretraining','version':3,'auth_required':True}
+        return {'service':'trainlab-pretraining','version':4,'auth_required':True}
 
     @app.get('/api/ready')
     def ready():
@@ -152,7 +152,8 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                 'active_job_id':manager.active_id if manager.active_id and identities.allowed(p,'job',manager.active_id) else None,
                 'identity':{'subject':p.subject,'role':p.role,'project':p.project},
                 'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes},
-                'scheduler_alive':bool(manager.thread and manager.thread.is_alive())}
+                'scheduler_alive':bool(manager.thread and manager.thread.is_alive()),
+                'disk':dict(zip(('total','used','free'),shutil.disk_usage(state)))}
 
     @app.get('/api/datasets')
     def datasets(p=Depends(auth)):
@@ -162,6 +163,53 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
             else:
                 rows=db.execute("SELECT d.* FROM datasets d JOIN resource_acl a ON a.kind='dataset' AND a.id=d.id WHERE a.project=? ORDER BY d.created_at DESC LIMIT 500",(p.project,))
             return [dict(r) for r in rows]
+
+    @app.get('/api/datasets/{did}/preview')
+    def preview_dataset(did: str, p=Depends(auth)):
+        if not re.fullmatch(r'[a-f0-9]{32}',did):
+            raise HTTPException(404,'数据集不存在')
+        identities.require(p,'dataset',did)
+        with manager.db() as db:
+            row=db.execute('SELECT * FROM datasets WHERE id=?',(did,)).fetchone()
+        if not row:
+            raise HTTPException(404,'数据集不存在')
+        samples=[]
+        path=manager.root/'datasets'/(did+'.jsonl')
+        if not path.is_file():
+            raise HTTPException(409,'语料文件缺失，请检查存储或重新上传')
+        # Inspect at most 64 physical lines; no full-corpus allocation.
+        with path.open('rb') as src:
+            for _ in range(64):
+                line=src.readline(1024*1024+1)
+                if not line:break
+                if not line.strip():continue
+                try:
+                    item=json.loads(line)
+                    text=item['text']
+                    if not isinstance(text,str):raise ValueError()
+                except (ValueError,KeyError,TypeError):
+                    raise HTTPException(409,'语料文件已损坏，请检查备份')
+                samples.append({'text':text[:800],'truncated':len(text)>800})
+                if len(samples)==3:break
+        return {'dataset':dict(row),'samples':samples,'preview_limit':3,'character_limit':800}
+
+    @app.get('/api/overview')
+    def overview(p=Depends(auth)):
+        project=None if p.role=='admin' else p.project
+        with manager.db() as db:
+            clause='' if project is None else " JOIN resource_acl a ON a.kind='job' AND a.id=j.id WHERE a.project=?"
+            args=() if project is None else (project,)
+            counts=dict(db.execute('SELECT j.status,COUNT(*) FROM jobs j'+clause+' GROUP BY j.status',args).fetchall())
+            ds_clause='' if project is None else " JOIN resource_acl a ON a.kind='dataset' AND a.id=d.id WHERE a.project=?"
+            ds=db.execute('SELECT COUNT(*),COALESCE(SUM(d.bytes),0) FROM datasets d'+ds_clause,args).fetchone()
+        return {'jobs':counts,'total_jobs':sum(counts.values()),'dataset_count':ds[0],'dataset_bytes':ds[1]}
+
+    @app.get('/api/jobs/page')
+    def jobs_page(q: str=Query(default='',max_length=80), status: str=Query(default='',max_length=20),
+                  offset: int=Query(default=0,ge=0,le=1000000), limit: int=Query(default=12,ge=1,le=100), p=Depends(auth)):
+        if status and status not in ('queued','running','cancelling','succeeded','failed','interrupted','cancelled'):
+            raise HTTPException(422,'任务状态无效')
+        return manager.page_jobs(None if p.role=='admin' else p.project,q,status,offset,limit)
 
     @app.post('/api/datasets')
     async def upload(request: Request, name: str='corpus.jsonl', p=Depends(writer)):
