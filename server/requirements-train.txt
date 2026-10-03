@@ -1,0 +1,6 @@
+-r requirements-api.txt
+transformers==5.18.0
+accelerate==1.15.0
+tokenizers==0.23.2
+numpy==2.2.6
+safetensors==0.6.2

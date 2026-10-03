@@ -1,0 +1,312 @@
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import time
+import threading
+import logging
+import anyio
+from pathlib import Path
+import uuid
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from server.manager import Manager, ROOT, gpu_inventory, now
+from server.schema import TrainConfig
+from server.security import AuthStore, Principal
+
+MAX_UPLOAD = 100*1024*1024
+AUDIT_LOG = logging.getLogger('trainlab.audit')
+if not AUDIT_LOG.handlers:
+    AUDIT_LOG.addHandler(logging.StreamHandler())
+AUDIT_LOG.setLevel(logging.INFO)
+AUDIT_LOG.propagate = False
+
+def create_app(state_dir=None, token=None, start_scheduler=True):
+    secret = token if token is not None else os.environ.get('TRAINLAB_API_TOKEN', '')
+    state = Path(state_dir or os.environ.get('TRAINLAB_STATE_DIR', ROOT/'state'))
+    production = os.environ.get('TRAINLAB_ENV', 'development') == 'production'
+    if production and secret:
+        raise RuntimeError('Production requires individual credentials. Remove TRAINLAB_API_TOKEN and use scripts.users.')
+    if secret and len(secret) < 32:
+        raise RuntimeError('Development token must contain at least 32 characters.')
+    manager = Manager(state)
+    identities = AuthStore(manager)
+    upload_slots = threading.BoundedSemaphore(2)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        if start_scheduler:
+            manager.start()
+        yield
+        if start_scheduler:
+            manager.close()
+
+    app = FastAPI(title='TrainLab self-hosted pretraining', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.manager = manager
+
+    app.state.identities = identities
+
+    @app.middleware('http')
+    async def bounded_json(request, call_next):
+        if request.url.path.startswith('/api/') and request.method in ('POST','PUT','PATCH') and request.url.path != '/api/datasets':
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body)>64*1024:
+                    return JSONResponse({'detail':'配置请求不能超过 64 KiB'},status_code=413)
+            request._body = bytes(body)
+        return await call_next(request)
+
+    @app.middleware('http')
+    async def security_headers_and_audit(request, call_next):
+        rid = uuid.uuid4().hex
+        status = 500
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers.update({'X-Request-ID':rid,'X-Content-Type-Options':'nosniff',
+                'X-Frame-Options':'DENY','Referrer-Policy':'no-referrer',
+                'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+                'Cache-Control':'no-store' if request.url.path.startswith('/api/') else 'no-cache'})
+            return response
+        finally:
+            if request.url.path.startswith('/api/') and request.url.path not in ('/api/health','/api/ready'):
+                actor = getattr(request.state,'principal',Principal('anonymous','viewer',''))
+                route = request.scope.get('route')
+                route_path = getattr(route,'path','unmatched')
+                target=request.path_params.get('jid','')
+                if re.fullmatch(r'[a-f0-9]{32}',target):
+                    route_path=route_path.replace('{jid}',target)
+                def record():
+                    with manager.db() as db:
+                        db.execute('INSERT INTO audit_events(time,request_id,actor,project,method,path,status) VALUES(?,?,?,?,?,?,?)',
+                            (now(),rid,actor.subject,actor.project,request.method,route_path,status))
+                await anyio.to_thread.run_sync(record)
+                AUDIT_LOG.info(json.dumps({'request_id':rid,'actor':actor.subject,
+                    'method':request.method,'route':route_path,'status':status,'duration_ms':round((time.monotonic()-started)*1000)}))
+
+    def auth(request: Request, authorization: str = Header(default='')):
+        raw = authorization[7:] if authorization.startswith('Bearer ') else ''
+        if secret and hmac.compare_digest(raw.encode(),secret.encode()):
+            principal = Principal('development-admin','admin','default')
+        else:
+            principal = identities.authenticate(raw)
+        request.state.principal = principal
+        return principal
+
+    def writer(p=Depends(auth)):
+        p.write()
+        return p
+
+    def job(jid, p):
+        identities.require(p,"job",jid)
+        if not re.fullmatch(r'[a-f0-9]{32}', jid):
+            raise HTTPException(404, '任务不存在')
+        found = manager.get(jid)
+        if not found:
+            raise HTTPException(404, '任务不存在')
+        return found
+
+    @app.get('/api/health')
+    def health():
+        return {'service':'trainlab-pretraining','version':3,'auth_required':True}
+
+    @app.get('/api/ready')
+    def ready():
+        healthy = bool(manager.thread and manager.thread.is_alive()) and shutil.disk_usage(state).free >= manager.min_free_bytes
+        return JSONResponse({'ready':healthy},status_code=200 if healthy else 503)
+
+    @app.get('/api/me')
+    def me(p=Depends(auth)):
+        return {'subject':p.subject,'role':p.role,'project':p.project}
+
+    @app.get('/api/audit')
+    def audit(p=Depends(auth)):
+        if p.role!='admin':
+            raise HTTPException(403,'需要管理员权限')
+        with manager.db() as db:
+            return [dict(r) for r in db.execute('SELECT * FROM audit_events ORDER BY seq DESC LIMIT 200')]
+
+    @app.get('/api/metrics',response_class=PlainTextResponse)
+    def metrics(p=Depends(auth)):
+        if p.role!='admin':
+            raise HTTPException(403,'需要管理员权限')
+        with manager.db() as db:
+            counts = dict(db.execute('SELECT status,COUNT(*) FROM jobs GROUP BY status').fetchall())
+        lines = ['# TYPE trainlab_jobs gauge']
+        for st in ('queued','running','cancelling','succeeded','failed','interrupted','cancelled'):
+            lines.append('trainlab_jobs{status="'+st+'"} '+str(counts.get(st,0)))
+        lines += ['# TYPE trainlab_disk_free_bytes gauge','trainlab_disk_free_bytes '+str(shutil.disk_usage(state).free),
+            '# TYPE trainlab_scheduler_alive gauge','trainlab_scheduler_alive '+str(int(bool(manager.thread and manager.thread.is_alive())))]
+        return '\n'.join(lines)+'\n'
+
+    @app.get('/api/system')
+    def system(p=Depends(auth)):
+        return {**gpu_inventory(), 'scheduler':'single_job_queue', 'max_upload_mib':100,
+                'backend':'GPT-2 from scratch + byte-level BPE + PyTorch DDP',
+                'active_job_id':manager.active_id if manager.active_id and identities.allowed(p,'job',manager.active_id) else None,
+                'identity':{'subject':p.subject,'role':p.role,'project':p.project},
+                'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes},
+                'scheduler_alive':bool(manager.thread and manager.thread.is_alive())}
+
+    @app.get('/api/datasets')
+    def datasets(p=Depends(auth)):
+        with manager.db() as db:
+            if p.role=='admin':
+                rows=db.execute('SELECT * FROM datasets ORDER BY created_at DESC LIMIT 500')
+            else:
+                rows=db.execute("SELECT d.* FROM datasets d JOIN resource_acl a ON a.kind='dataset' AND a.id=d.id WHERE a.project=? ORDER BY d.created_at DESC LIMIT 500",(p.project,))
+            return [dict(r) for r in rows]
+
+    @app.post('/api/datasets')
+    async def upload(request: Request, name: str='corpus.jsonl', p=Depends(writer)):
+        if len(name)>100 or '/' in name or '\\' in name:
+            raise HTTPException(422,'文件名无效')
+        if not upload_slots.acquire(blocking=False):
+            raise HTTPException(429,'上传并发已达上限，请稍后重试')
+        did = uuid.uuid4().hex
+        path = manager.root/'datasets'/(did+'.jsonl')
+        temp = path.with_suffix('.tmp')
+        size = 0
+        sha = hashlib.sha256()
+        try:
+            with temp.open('wb') as out:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413,'最多上传 100 MiB 的 UTF-8 JSONL')
+                    if shutil.disk_usage(state).free < manager.min_free_bytes+len(chunk):
+                        raise HTTPException(507,'磁盘可用空间不足')
+                    sha.update(chunk)
+                    await anyio.to_thread.run_sync(out.write,chunk)
+            def validate_and_save():
+                rows = 0
+                with temp.open('rb') as src:
+                    while True:
+                        line = src.readline(1024*1024+1)
+                        if not line:
+                            break
+                        if len(line)>1024*1024:
+                            raise ValueError('单行不能超过 1 MiB')
+                        if not line.strip():
+                            continue
+                        item = json.loads(line.decode('utf-8'))
+                        if not isinstance(item,dict) or set(item)!={'text'} or not isinstance(item['text'],str) or not item['text'].strip():
+                            raise ValueError('每行必须是仅包含非空 text 字符串的 JSON 对象')
+                        rows += 1
+                if rows < 20:
+                    raise ValueError('至少需要 20 篇文档；每行一篇，请勿将同篇文档切成跨集合的行')
+                temp.replace(path)
+                with manager.db() as db:
+                    db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)',(did,name,rows,size,sha.hexdigest(),now()))
+                    identities.grant(p,'dataset',did,db)
+                return {'id':did,'name':name,'rows':rows,'bytes':size,'sha256':sha.hexdigest()}
+            return await anyio.to_thread.run_sync(validate_and_save)
+        except (ValueError,UnicodeError) as e:
+            raise HTTPException(422,str(e))
+        finally:
+            temp.unlink(missing_ok=True)
+            upload_slots.release()
+            with manager.db() as db:
+                saved=db.execute("SELECT 1 FROM datasets WHERE id=?",(did,)).fetchone()
+            if not saved:
+                path.unlink(missing_ok=True)
+
+    @app.post('/api/estimate', dependencies=[Depends(auth)])
+    def estimate(config: TrainConfig):
+        return config.estimate()
+
+    @app.post('/api/jobs')
+    def create(config: TrainConfig, idempotency_key: str = Header(default=None), p=Depends(writer)):
+        identities.require(p,'dataset',config.dataset_id)
+        if idempotency_key and not re.fullmatch(r'[a-f0-9-]{32,36}', idempotency_key):
+            raise HTTPException(422, '提交标识无效')
+        available = {g['index'] for g in gpu_inventory()['gpus']}
+        if not set(config.gpu_ids)<=available:
+            raise HTTPException(422,'所选 GPU 不可用，请先检查机器与驱动')
+        try:
+            key = hashlib.sha256((p.project+'\0'+p.subject+'\0'+idempotency_key).encode()).hexdigest() if idempotency_key else None
+            result = manager.create(config.model_dump(), request_key=key, principal=p)
+        except ValueError as e:
+            raise HTTPException(422,str(e))
+        return result
+
+    @app.get('/api/jobs')
+    def jobs(p=Depends(auth)):
+        return manager.list_jobs(None if p.role=='admin' else p.project)
+
+    @app.get('/api/jobs/{jid}', dependencies=[Depends(auth)])
+    def detail(jid: str, p=Depends(auth)):
+        found = job(jid,p)
+        folder = manager.jobdir(jid)
+        found['checkpoints'] = [p.name for p in manager.checkpoints(jid)]
+        found['metrics'] = []
+        mp = folder/'metrics.jsonl'
+        if mp.exists():
+            # Bound response and tolerate a concurrently written final line.
+            with mp.open('rb') as f:
+                f.seek(max(0,mp.stat().st_size-256*1024))
+                for line in f.read().splitlines():
+                    try:
+                        found['metrics'].append(json.loads(line))
+                    except (ValueError,UnicodeError):
+                        continue
+            found['metrics'] = found['metrics'][-2000:]
+        summary = folder/'output'/'summary.json'
+        found['summary'] = json.loads(summary.read_text()) if summary.exists() else None
+        found['artifacts'] = [{'path':str(p.relative_to(folder/'output')),'bytes':p.stat().st_size} for p in (folder/'output').rglob('*') if p.is_file() and not p.is_symlink() and 'checkpoint-' not in str(p.relative_to(folder/'output'))] if (folder/'output').exists() else []
+        return found
+
+    @app.get('/api/jobs/{jid}/logs', dependencies=[Depends(auth)])
+    def logs(jid: str, p=Depends(auth)):
+        job(jid,p)
+        path = manager.jobdir(jid)/'train.log'
+        if not path.exists():
+            return {'text':''}
+        with path.open('rb') as f:
+            f.seek(max(0,path.stat().st_size-128*1024))
+            return {'text':f.read().decode('utf-8',errors='replace')}
+
+    @app.post('/api/jobs/{jid}/cancel', dependencies=[Depends(auth)])
+    def cancel(jid: str, p=Depends(writer)):
+        job(jid,p)
+        return manager.cancel(jid)
+
+    @app.post('/api/jobs/{jid}/resume', dependencies=[Depends(auth)])
+    def resume(jid: str, p=Depends(writer)):
+        with manager.lock:
+            found = job(jid,p)
+            if found['status'] not in ['failed','cancelled','interrupted']:
+                raise HTTPException(409,'只能恢复已失败、已取消或已中断的任务')
+            checkpoints = manager.checkpoints(jid)
+            if not checkpoints:
+                raise HTTPException(409,'没有包含优化器状态的完整检查点，需重新提交训练')
+            # Configuration, tokenizer and dataset remain unchanged for resume.
+            existing = [j for j in manager.list_jobs() if j['resume_from']==str(checkpoints[-1]) and j['status'] in ['queued','running','cancelling']]
+            if existing:
+                return existing[0]
+            with manager.db() as db:
+                acl=db.execute("SELECT project FROM resource_acl WHERE kind='job' AND id=?",(jid,)).fetchone()
+            owner=Principal(p.subject,p.role,acl['project'] if acl else p.project,p.key_id)
+            try:
+                return manager.create(found['config'],str(checkpoints[-1]),principal=owner)
+            except ValueError as e:
+                raise HTTPException(422,str(e))
+
+    @app.get('/api/jobs/{jid}/artifact/{file_path:path}', dependencies=[Depends(auth)])
+    def artifact(jid: str, file_path: str, p=Depends(auth)):
+        job(jid,p)
+        root = (manager.jobdir(jid)/'output').resolve()
+        candidate = root/file_path
+        path = candidate.resolve()
+        if root not in path.parents or not path.is_file() or any(x.is_symlink() for x in (candidate,*candidate.parents)):
+            raise HTTPException(404,'文件不存在')
+        return FileResponse(path,filename=path.name)
+
+    app.mount('/',StaticFiles(directory=ROOT/'dist',html=True),name='frontend')
+    return app

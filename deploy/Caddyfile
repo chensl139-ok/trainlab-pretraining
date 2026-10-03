@@ -1,0 +1,11 @@
+{$TRAINLAB_DOMAIN} {
+    request_body {
+        max_size 105MB
+    }
+    reverse_proxy trainlab:8000
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=31536000"
+    }
+}

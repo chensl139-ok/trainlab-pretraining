@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+state
+.runtime
+.pytest_cache
+**/__pycache__
+.sites-runtime
+
+.venv-train
+
+.runtime-smoke.log

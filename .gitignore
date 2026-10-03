@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.runtime/
+state/
+*.pyc
+.sites-runtime/
+
+.venv-train/
+
+.runtime-smoke.log
+
+# Local credentials and generated training artifacts
+.env.*
+!.env.example
+credentials/
+*.key
+*.pem
+*.sqlite3*
+*.safetensors
+checkpoint-*/
