@@ -8,7 +8,7 @@ const date=x=>x?new Date(x).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit
 let token='',connected=false,canWrite=false,session=0,system=null,datasets=[],selectedJob=null,detailData=null;
 let refreshing=false,submitting=false,mutating=false,uploading=false,uploadRequest=null,selectedFile=null;
 let offset=0,total=0,pageSize=12,listRevision=0,detailRevision=0,activeTab='metrics',pendingSubmission=null,dialogAction=null,dialogBusy=false,refreshQueued=false;
-let testSubmitting=false,testRevision=0,selectedTest=null,testItems=[],pendingTest=null;
+let testSubmitting=false,testRevision=0,selectedTest=null,testItems=[],pendingTest=null,testError='';
 const requests=new Set();let toastTimer,searchTimer;
 const credentialKey='trainlab-tab-credential-v1';
 function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
@@ -195,38 +195,58 @@ $('#open-catalog').onclick=async()=>{
 function paintTestControls(j){
   const version=$('#test-checkpoint'),models=j.testable_models||[],same=version.dataset.job===j.id,old=version.value,signature=JSON.stringify(models);
   if(!same||version.dataset.models!==signature){version.innerHTML=models.length?models.map(x=>`<option value="${esc(x)}">${x==='final'?'最终模型':esc(x)}</option>`).join(''):'<option value="">等待完整模型</option>';if(same&&models.includes(old))version.value=old;version.dataset.models=signature;version.dataset.job=j.id;}
-  if(!same){delete $('#test-result').dataset.signature;selectedTest=null;testItems=[];pendingTest=null;$('#test-result').hidden=true;$('#test-history').innerHTML='<div class="empty">正在读取测试记录…</div>';}
+  if(!same){testError='';delete $('#test-history').dataset.signature;$('#test-result-empty').hidden=false;delete $('#test-result').dataset.signature;selectedTest=null;testItems=[];pendingTest=null;$('#test-result').hidden=true;$('#test-history').innerHTML='<div class="empty">正在读取测试记录…</div>';}
   const device=$('#test-device'),devices=JSON.stringify(system?.gpus?.map(g=>g.index)||[]);
   if(device.dataset.cards!==devices){const before=device.value;device.innerHTML='<option value="cpu">CPU · 小模型测试</option>'+(system?.gpus||[]).map(g=>`<option value="cuda:${g.index}">GPU ${g.index} · ${esc(g.name)}</option>`).join('');device.value=[...device.options].some(x=>x.value===before)?before:'cpu';if(!device.dataset.cards&&system?.gpus?.length)device.value='cuda:'+system.gpus[0].index;device.dataset.cards=devices;}
   const ds=$('#test-dataset'),dsSignature=JSON.stringify([j.id,datasets.map(d=>[d.id,d.name])]);
   if(ds.dataset.signature!==dsSignature){const previous=ds.value;ds.innerHTML='<option value="">原训练任务的验证集</option>'+datasets.filter(d=>d.id!==j.config.dataset_id).map(d=>`<option value="${d.id}">${esc(d.name)}</option>`).join('');ds.value=[...ds.options].some(x=>x.value===previous)?previous:'';ds.dataset.signature=dsSignature;}
-  $('#test-availability').textContent=models.length?`${UI.architectureNames[j.config.architecture||'gpt2']} · ${j.config.layers} 层 · 上下文 ${j.config.seq_length} tokens · ${models.length} 个可测试版本`:'等待训练停止并写出完整模型或检查点后，即可测试。';
-  $('#submit-test').disabled=!canWrite||!models.length||testSubmitting||!!system?.control?.paused;$('#submit-test').textContent=testSubmitting?'正在提交…':$('#test-mode').value==='generate'?'运行续写测试 →':'运行语料评估 →';
+  $('#test-availability').textContent=models.length?`${UI.architectureNames[j.config.architecture||'gpt2']} · ${j.config.layers} 层 · 上下文 ${j.config.seq_length} tokens · ${models.length} 个模型版本`:'当前任务还没有可测试的完整模型。';
+  $('#test-new-tokens').max=Math.min(256,j.config.seq_length-1);
+  $('#test-context-hint').textContent=`当前上下文 ${j.config.seq_length} tokens，包含输入和生成内容。基础模型用于续写，不等同于聊天模型。`;
+  $('#test-submit-state').textContent=testError||(!models.length?'等待训练停止并写出完整模型或检查点后再测试。':system?.control?.paused?'维护模式下暂不接收新测试。':!canWrite?'当前账号为只读。':'');
+  $('#submit-test').disabled=!canWrite||!models.length||testSubmitting||!!system?.control?.paused;$('#submit-test').textContent=testSubmitting?'正在提交…':$('#test-mode').value==='generate'?'运行续写测试':'运行语料评估';
 }
-$('#test-mode').onchange=()=>{const score=$('#test-mode').value==='score';$('#generation-fields').hidden=score;$('#score-fields').hidden=!score;$('#test-prompt').required=!score;if(detailData)paintTestControls(detailData);};
-$('#test-prompt').required=true;
+$('#test-mode').onchange=()=>{
+  const score=$('#test-mode').value==='score';
+  $('#generation-fields').hidden=$('#generation-advanced').hidden=score;$('#score-fields').hidden=!score;
+  all('#generation-fields input,#generation-fields textarea,#generation-advanced input').forEach(el=>el.disabled=score);
+  all('#score-fields input,#score-fields select').forEach(el=>el.disabled=!score);
+  all('[name=test-mode-choice]').forEach(el=>el.checked=el.value===$('#test-mode').value);
+  $('#test-prompt').required=!score;$('#test-top-p').disabled=score||+$('#test-temperature').value===0;
+  $('#test-prompt').setCustomValidity('');testError='';if(detailData)paintTestControls(detailData);
+};
+all('[name=test-mode-choice]').forEach(el=>el.onchange=()=>{$('#test-mode').value=el.value;$('#test-mode').onchange();});
+$('#test-temperature').oninput=()=>{$('#test-top-p').disabled=$('#test-mode').value==='score'||+$('#test-temperature').value===0;};
+$('#test-top-p').disabled=true;
+$('#model-test-form').addEventListener('invalid',event=>{const details=event.target.closest('details');if(details)details.open=true;},true);
+$('#model-test-form').addEventListener('input',()=>{testError='';$('#test-prompt').setCustomValidity('');if(detailData)paintTestControls(detailData);});
 $('#model-test-form').onsubmit=async e=>{
   e.preventDefault();if(!detailData||!canWrite||testSubmitting)return;
-  const jid=detailData.id,version=session,device=$('#test-device').value,c={mode:$('#test-mode').value,checkpoint:$('#test-checkpoint').value,prompt:$('#test-mode').value==='generate'?$('#test-prompt').value:'',max_new_tokens:+$('#test-new-tokens').value,temperature:+$('#test-temperature').value,top_p:+$('#test-top-p').value,seed:+$('#test-seed').value,device:device.startsWith('cuda:')?'cuda':'cpu',gpu_id:device.startsWith('cuda:')?+device.split(':')[1]:0,dataset_id:$('#test-mode').value==='score'?($('#test-dataset').value||null):null,max_blocks:+$('#test-blocks').value,max_runtime_seconds:+$('#test-timeout').value};
+  if($('#test-mode').value==='generate'&&!$('#test-prompt').value.trim()){$('#test-prompt').setCustomValidity('请输入非空的续写内容');$('#test-prompt').reportValidity();return;}
+  testError='';
+  const jid=detailData.id,version=session,device=$('#test-device').value,score=$('#test-mode').value==='score',sampling=!score&&+$('#test-temperature').value>0;
+  const c={mode:score?'score':'generate',checkpoint:$('#test-checkpoint').value,prompt:score?'':$('#test-prompt').value,max_new_tokens:score?32:+$('#test-new-tokens').value,temperature:score?0:+$('#test-temperature').value,top_p:sampling?+$('#test-top-p').value:0.9,seed:+$('#test-seed').value,device:device.startsWith('cuda:')?'cuda':'cpu',gpu_id:device.startsWith('cuda:')?+device.split(':')[1]:0,dataset_id:score?($('#test-dataset').value||null):null,max_blocks:score?+$('#test-blocks').value:32,max_runtime_seconds:+$('#test-timeout').value};
   const payload=JSON.stringify(c),signature=jid+payload;
   if(!pendingTest||pendingTest.signature!==signature)pendingTest={signature,key:[...crypto.getRandomValues(new Uint8Array(16))].map(x=>x.toString(16).padStart(2,'0')).join('')};
   testSubmitting=true;paintTestControls(detailData);
-  try{const result=await api('/jobs/'+jid+'/tests',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':pendingTest.key},body:payload});if(version!==session||jid!==selectedJob)return;pendingTest=null;selectedTest=result.id;await loadTests();toast('测试已入队，结果会自动刷新');}
-  catch(error){showError(error);}finally{testSubmitting=false;if(detailData)paintTestControls(detailData);}
+  try{const result=await api('/jobs/'+jid+'/tests',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':pendingTest.key},body:payload});if(version!==session||jid!==selectedJob)return;pendingTest=null;selectedTest=result.id;await loadTests();if(version!==session||jid!==selectedJob)return;$('#test-result').scrollIntoView({block:'nearest'});toast('测试已入队，结果会自动刷新');}
+  catch(error){if(version===session&&jid===selectedJob&&!error.stale)testError=error.message;}finally{testSubmitting=false;if(detailData)paintTestControls(detailData);}
 };
 async function loadTests(){
   if(!connected||!selectedJob)return;const jid=selectedJob,revision=++testRevision;const items=await api('/jobs/'+jid+'/tests');if(jid!==selectedJob||revision!==testRevision)return;
   testItems=items;if(!items.some(x=>x.id===selectedTest))selectedTest=items[0]?.id||null;
-  $('#test-history').innerHTML=items.length?items.map(t=>`<div class="test-record"><button data-test="${t.id}" class="${selectedTest===t.id?'selected':''}"><strong>${t.config.mode==='generate'?'文本续写':'语料评估'} · ${esc(t.config.checkpoint)} <span class="badge ${esc(t.status)}">${names[t.status]||esc(t.status)}</span></strong><small>${date(t.created_at)} · ${esc(t.config.device.toUpperCase())} · ${t.result?.loss!=null?'Loss '+t.result.loss.toFixed(4):t.config.mode==='generate'?esc(t.config.prompt.slice(0,50)):'等待评估结果'}</small></button>${canWrite&&['queued','running','cancelling'].includes(t.status)?`<button class="button compact" data-stop-test="${t.id}" ${t.status==='cancelling'?'disabled':''}>停止</button>`:''}</div>`).join(''):'<div class="empty">尚未运行模型测试</div>';
-  all('[data-test]').forEach(b=>b.onclick=()=>{selectedTest=b.dataset.test;all('[data-test]').forEach(x=>x.classList.toggle('selected',x===b));paintTestResult();});
-  all('[data-stop-test]').forEach(b=>b.onclick=()=>{openDialog('停止模型测试？','<p>停止本次续写或评估，已训练好的模型保持不变。</p>','确认停止',async()=>{await api('/jobs/'+jid+'/tests/'+b.dataset.stopTest+'/cancel',{method:'POST'});if(jid===selectedJob)await loadTests();});});paintTestResult();
+  $('#test-history-count').textContent=`${items.length} 条`;const history=$('#test-history'),historySignature=JSON.stringify([jid,items,canWrite]);
+  if(history.dataset.signature!==historySignature){history.dataset.signature=historySignature;
+  history.innerHTML=items.length?items.map(t=>`<div class="test-record"><button data-test="${t.id}" class="${selectedTest===t.id?'selected':''}"><strong>${t.config.mode==='generate'?'文本续写':'语料评估'} · ${esc(t.config.checkpoint)} <span class="badge ${esc(t.status)}">${names[t.status]||esc(t.status)}</span></strong><small>${date(t.created_at)} · ${esc(t.config.device.toUpperCase())} · ${t.result?.loss!=null?'Loss '+t.result.loss.toFixed(4):t.config.mode==='generate'?esc(t.config.prompt.slice(0,50)):'等待评估结果'}</small></button>${canWrite&&['queued','running','cancelling'].includes(t.status)?`<button class="button compact" data-stop-test="${t.id}" ${t.status==='cancelling'?'disabled':''}>停止</button>`:''}</div>`).join(''):'<div class="empty">尚未运行模型测试</div>';
+  all('[data-test]').forEach(b=>b.onclick=()=>{selectedTest=b.dataset.test;all('[data-test]').forEach(x=>x.classList.toggle('selected',x===b));paintTestResult();$('#test-result').scrollIntoView({block:'nearest'});$('#test-result').focus({preventScroll:true});});
+  all('[data-stop-test]').forEach(b=>b.onclick=()=>{openDialog('停止模型测试？','<p>停止本次续写或评估，已训练好的模型保持不变。</p>','确认停止',async()=>{await api('/jobs/'+jid+'/tests/'+b.dataset.stopTest+'/cancel',{method:'POST'});if(jid===selectedJob)await loadTests();});});}paintTestResult();
 }
 function paintTestResult(){
-  const t=testItems.find(x=>x.id===selectedTest),box=$('#test-result');box.hidden=!t;if(!t){delete box.dataset.signature;return;}const signature=JSON.stringify(t);if(box.dataset.signature===signature)return;box.dataset.signature=signature;const r=t.result;
+  const t=testItems.find(x=>x.id===selectedTest),box=$('#test-result');box.hidden=!t;$('#test-result-empty').hidden=!!t;if(!t){delete box.dataset.signature;return;}const signature=JSON.stringify(t);if(box.dataset.signature===signature)return;box.dataset.signature=signature;const r=t.result;
   let body=r?(r.mode==='generate'?`<h4>输入提示词</h4><pre>${esc(r.prompt)}</pre><h4>模型续写</h4><pre class="result-text">${esc(r.completion||'模型输出了结束符或仅含特殊符号，没有可展示的文本。')}</pre><p class="mini-note">输入 ${r.prompt_tokens} tokens · 新增 ${r.generated_tokens} tokens · ${r.generation_seconds.toFixed(2)} 秒 · ${r.tokens_per_second?.toFixed(1)||'—'} tokens/s</p>`:`<div class="job-metrics"><div><small>评估 Loss</small><b>${r.loss.toFixed(4)}</b></div><div><small>Perplexity</small><b>${r.perplexity?.toFixed(2)||'超出范围'}</b></div><div><small>有效 tokens</small><b>${number(r.evaluated_tokens)}</b></div></div><p class="mini-note">${r.blocks} 个完整块 · 每块 ${r.sequence_length} tokens · ${r.source==='training_validation'?'原验证集':'另选评估语料'}</p><details><summary>复现与比较条件</summary><p>语料 SHA256：<code>${esc(r.dataset_sha256)}</code></p><p>分词器 SHA256：<code>${esc(r.tokenizer_sha256)}</code></p></details>`):`<p>${t.status==='queued'?'正在排队，前面的训练或测试结束后开始。':t.status==='running'?'正在加载模型并执行测试…':names[t.status]||esc(t.status)}</p>`;
   if(t.error){const last=t.error.trim().split('\n').at(-1);body+=`<p class="job-error">${esc(last)}</p><details class="test-error-details"><summary>查看错误详情</summary><pre>${esc(t.error)}</pre></details>`;}
-  box.innerHTML=`<div class="result-actions"><button id="reuse-test" class="text-button">复用测试条件</button>${r?'<button id="export-test" class="text-button">下载结果 JSON</button>':''}</div>${body}${r?`<p class="mini-note">${esc(r.note)}</p>`:''}`;
-  $('#reuse-test').onclick=()=>{const c=t.config;$('#test-mode').value=c.mode;$('#test-prompt').value=c.prompt;$('#test-new-tokens').value=c.max_new_tokens;$('#test-temperature').value=c.temperature;$('#test-top-p').value=c.top_p;$('#test-seed').value=c.seed;$('#test-timeout').value=c.max_runtime_seconds;$('#test-blocks').value=c.max_blocks;$('#test-dataset').value=c.dataset_id||'';const target=c.device==='cuda'?'cuda:'+c.gpu_id:'cpu';$('#test-device').value=[...$('#test-device').options].some(o=>o.value===target)?target:'cpu';$('#test-mode').onchange();toast('已复用测试条件，可切换检查点后再次运行');};
+  box.innerHTML=`<div class="test-result-meta"><div>${t.config.mode==='generate'?'文本续写':'语料评估'} · ${t.config.checkpoint==='final'?'最终模型':esc(t.config.checkpoint)}<small>${date(t.created_at)} · ${esc(t.config.device.toUpperCase())}</small></div><span class="badge ${esc(t.status)}">${t.status==='running'?'测试中':names[t.status]||esc(t.status)}</span></div>${body}${r?`<p class="mini-note">${esc(r.note)}</p>`:''}<div class="result-actions"><button id="reuse-test" class="text-button">复用参数再测试</button>${r?'<button id="export-test" class="text-button">下载结果 JSON</button>':''}</div>`;
+  $('#reuse-test').onclick=()=>{const c=t.config;$('#test-mode').value=c.mode;$('#test-prompt').value=c.prompt;$('#test-new-tokens').value=c.max_new_tokens;$('#test-temperature').value=c.temperature;$('#test-top-p').value=c.top_p;$('#test-seed').value=c.seed;$('#test-timeout').value=c.max_runtime_seconds;$('#test-blocks').value=c.max_blocks;$('#test-dataset').value=c.dataset_id||'';const target=c.device==='cuda'?'cuda:'+c.gpu_id:'cpu';$('#test-device').value=[...$('#test-device').options].some(o=>o.value===target)?target:'cpu';$('#test-mode').onchange();$('#model-test-form').scrollIntoView({block:'start'});toast('已复用测试参数，请核对模型版本和运行设备');};
   if(r)$('#export-test').onclick=()=>downloadBlob(new Blob([JSON.stringify(t,null,2)],{type:'application/json'}),'model-test-'+t.id.slice(0,8)+'.json');
 }
 $('#refresh-tests').onclick=()=>loadTests().catch(showError);
