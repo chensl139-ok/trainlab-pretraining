@@ -2,6 +2,7 @@
 
 ## 模型测试页布局与交互（2026-10-04）
 
+- 已发布并匿名验证 Linux amd64 镜像 `ghcr.io/chensl139-ok/trainlab-pretraining:latest`，源码提交 `69adaeefa80337c24f6442afc0a8d42f652d5a0a`，固定摘要 `sha256:7e79e29a889877e7d4ade40172c4121fa6ebf2d3cc23016a691cb28af328fffe`。[GitHub Actions](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37210406403) 的容器内 CPU 训练/恢复、生产 API 和只读文件系统检查均通过。
 - 测试区统一内边距，按卡片宽度自动切换单列；将模型选择、测试方式与输入、当前结果、历史记录分开。高级参数与历史默认收起，当前结果优先展示。
 - 本地浏览器通过真实 API 完成 Qwen3 最终模型续写（新增 8 tokens）与两个验证块评分（Loss 5.5745 / PPL 263.63）；仅证明测试链路可运行。切换模式后，隐藏的非法参数不阻止提交，也不进入对应请求字段。
 - 验证折叠高级参数中的非法运行时限会自动展开并定位；提示词在模式切换后保留。390px 窄屏表单单列、页面无横向溢出，桌面表单与结果边距一致，浏览器控制台无 error。
