@@ -2,6 +2,13 @@
 
 2026-10-03，macOS ARM64 / Python 3.12。目标为用户确认的 Linux + 8 张 RTX PRO 6000，第一阶段仅本人使用，尚未连接目标服务器。本版是经过加固的候选版，不能宣称达到字节内部标准或完成生产验收。
 
+## v6 镜像发布证据（2026-10-04）
+
+- [GitHub Actions 37207781607](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37207781607) 成功：45 项 Python + 15 项 Node 测试、Linux amd64 构建、三种架构的镜像内 CPU 训练/恢复/续写/评分、生产 API 启动和匿名请求拒绝均通过。
+- 只读根文件系统、非 root 生产容器内，临时签发测试凭据并验证运行诊断、数据库完整性、进入维护、维护期间 ready 可访问、恢复调度；测试凭据仅保存在临时容器状态中，未输出或提交。
+- 镜像源码：`f3f33bbc986fc5fee1b7c32c3251ea731871e4bc`；`latest` 与固定摘要 `ghcr.io/chensl139-ok/trainlab-pretraining@sha256:aad1636f9e29e84b81322757c25b50c33239364919c3eddff7dc2f2a303cf2f6` 对应。发布后通过匿名 GHCR manifest/config 读取核对 revision 一致。
+- 镜像内通过的是 CPU 与控制面检查；没有 NVIDIA GPU 的 CI 不证明八卡兼容、性能或长稳验收。
+
 ## v6 运行维护验证（2026-10-04）
 
 - 45 项 pytest + 15 项 Node 测试、JavaScript 语法、pip check 通过。新增维护权限/持久化/拒绝新工作、训练与测试计数隔离、资源不足保留队列、排空当前工作、执行锁阻止重复启动和备份、日志限额、最终产物校验、测试结果结构校验、NaN/Inf 失败、默认生产入口及旧学习深链兼容。
