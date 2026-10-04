@@ -2,6 +2,7 @@
 
 ## 后训练与 ModelScope 基座导入（2026-10-04）
 
+- Linux amd64 镜像已发布并匿名验证：`ghcr.io/chensl139-ok/trainlab-pretraining:latest`，源码 `fb366ad621742774f5ce402e3a7bd3d96d47df5b`，固定摘要 `sha256:c9f22f2ce2c9503745cd6fed6aee7d4c7bd5181c3e56104158b535555efdc23a`。[成功构建记录](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37212175121)。API 环境 51 项 pytest 通过、1 项需 torch 的数学检查跳过，16 项 Node 通过；实际训练镜像随后完成三种架构的 CPU 训练/恢复和 Qwen3 的 SFT/DPO 全流程，生产 API 与只读文件系统检查通过。CI 的小模型临时目录仅使用 10 MiB 测试水位，生产默认 5 GiB 未更改。
 - 接入全参数 SFT 与标准 sigmoid DPO，基座可来自 ModelScope 本地导入或同项目的完整训练产物。数据类型自动校验，提示词分组划分训练/验证；仅回答及 EOS 参与损失，超长样本明确拒绝。DPO 保持冻结参考模型且不将偏好损失换算为困惑度。
 - 52 项 pytest、16 项 Node 测试、JavaScript 语法和 pip check 通过。覆盖角色/项目隔离、基础模型唯一绑定、文件摘要改变拒绝、数据格式错配、模板/损失掩码、DPO 梯度方向，以及包含导入模型的备份恢复、导入锁与备份互斥。
 - 真实离线 CPU 小型 Qwen3 完成预训练 → SFT 10 步 → DPO 10 步。两个后训练阶段分别从 checkpoint-5 恢复，最终权重逐项相同；权重确实更新且基础模型摘要保持不变。使用实际 safetensors 小模型验证注册导入路径，测试产物明确标注本地 fixture，不冒充官方 ModelScope 权重。
