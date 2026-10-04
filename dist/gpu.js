@@ -20,7 +20,7 @@ function disconnected(message='已断开连接，服务端任务继续运行'){
 }
 function staleError(){const e=new Error('连接已变更');e.stale=true;return e;}
 async function api(path,options={}){
-  const version=session,controller=new AbortController();requests.add(controller);const timeout=setTimeout(()=>controller.abort(),20000);
+  const version=session,controller=new AbortController();requests.add(controller);const timeout=setTimeout(()=>controller.abort(),options.timeoutMs||20000);
   try{
     const response=await fetch('/api'+path,{...options,signal:controller.signal,headers:{Authorization:'Bearer '+token,...options.headers}});
     if(version!==session)throw staleError();
@@ -64,7 +64,7 @@ function updateForm(){
   const c=readConfig(),e=UI.estimate(c),errors=errorsFor(c);$('#budget').innerHTML=`<div class="budget-values"><span>参数量（估计）<b>${Number.isFinite(e.parameters)?(e.parameters/1e6).toFixed(1)+'M':'—'}</b></span><span>有效 Batch<b>${number(e.batch)}</b></span></div>每次更新 ${number(e.tokensPerStep)} tokens<br>计划处理 ${Number.isFinite(e.totalTokens)?(e.totalTokens/1e6).toFixed(2)+'M':'—'} tokens（含重复遍历）<small>按词表上限估计；此值不保证显存足够。</small>`;
   $('#form-errors').textContent=!canWrite&&connected?'当前账号为只读；仍可查看和导出实验。':errors.slice(0,3).join('；');
   $('#submit-job').disabled=!connected||!canWrite||submitting||errors.length>0;$('#submit-job').textContent=submitting?'正在提交…':'检查配置并提交 →';
-  $('#upload').disabled=!connected||!canWrite||uploading||!selectedFile;$('#upload').textContent=uploading?'上传校验中…':'上传并校验';$('#select-all-gpus').disabled=!system?.gpus.length;$('#preview-dataset').disabled=!datasets.some(d=>d.id===$('#dataset_id').value);
+  $('#open-catalog').disabled=!connected||!canWrite;$('#upload').disabled=!connected||!canWrite||uploading||!selectedFile;$('#upload').textContent=uploading?'上传校验中…':'上传并校验';$('#select-all-gpus').disabled=!system?.gpus.length;$('#preview-dataset').disabled=!datasets.some(d=>d.id===$('#dataset_id').value);
 }
 $('#job-form').addEventListener('input',()=>{if(['layers','hidden_size','heads'].includes(document.activeElement?.id))$('#preset').value='custom';updateForm();});
 $('#preset').onchange=()=>{const preset={tiny:[6,384,6],small:[12,768,12],medium:[24,1024,16]}[$('#preset').value];if(preset){['layers','hidden_size','heads'].forEach((id,i)=>$('#'+id).value=preset[i]);}else $('#advanced').open=true;updateForm();};
@@ -90,12 +90,12 @@ $('#upload').onclick=async()=>{
   finally{if(version===session){uploading=false;uploadRequest=null;$('#cancel-upload').hidden=true;$('#upload-progress').hidden=true;updateForm();}}
 };
 $('#cancel-upload').onclick=()=>uploadRequest?.abort();
-function openDialog(title,body,label,action){dialogAction=action;$('#dialog-title').textContent=title;$('#dialog-kicker').textContent=action?'操作确认':'数据检查';$('#dialog-body').innerHTML=body+'<p id="dialog-error" class="job-error" role="alert" hidden></p>';$('#dialog-confirm').textContent=label;$('#dialog-confirm').hidden=!action;$('#dialog-back').textContent=action?'返回修改':'关闭';$('#action-dialog').showModal();$('#dialog-back').focus();}
+function openDialog(title,body,label,action){dialogAction=action;$('#dialog-title').textContent=title;$('#dialog-kicker').textContent=action?'操作确认':'数据检查';$('#dialog-body').innerHTML=body+'<p id="dialog-error" class="job-error" role="alert" hidden></p>';$('#dialog-confirm').textContent=label;$('#dialog-confirm').hidden=!action;$('#dialog-back').textContent=action?'返回修改':'关闭';$('#action-dialog').classList.toggle('catalog-dialog',title==='常用文本数据集');$('#action-dialog').showModal();$('#dialog-back').focus({preventScroll:true});$('#action-dialog').scrollTop=0;}
 $('#dialog-back').onclick=()=>$('#action-dialog').close();
 $('#action-dialog').addEventListener('cancel',e=>{if(dialogBusy)e.preventDefault();});
 $('#action-dialog').addEventListener('close',()=>{dialogAction=null;});
 $('#dialog-confirm').onclick=async()=>{if(!dialogAction||dialogBusy)return;const action=dialogAction;dialogBusy=true;$('#dialog-confirm').disabled=true;$('#dialog-back').disabled=true;$('.dialog-close').disabled=true;try{if($('#dialog-error'))$('#dialog-error').hidden=true;await action();$('#action-dialog').close();}catch(error){if(!error.stale&&$('#action-dialog').open){$('#dialog-error').textContent=error.message;$('#dialog-error').hidden=false;}else showError(error);}finally{dialogBusy=false;$('#dialog-confirm').disabled=false;$('#dialog-back').disabled=false;$('.dialog-close').disabled=false;}};
-$('#preview-dataset').onclick=async()=>{const id=$('#dataset_id').value;$('#preview-dataset').disabled=true;try{const data=await api('/datasets/'+id+'/preview');const d=data.dataset;openDialog('语料预览',`<b>${esc(d.name)}</b><p>${number(d.rows)} 篇 · ${size(d.bytes)} · ${date(d.created_at)}</p><div class="digest">SHA256 · ${esc(d.sha256)}</div>${data.samples.map((s,i)=>`<div class="sample-heading">样本 ${i+1}${s.truncated?' · 已截断至 800 字符':''}</div><pre class="sample-text">${esc(s.text)}</pre>`).join('')}<p class="mini-note">最多显示前三篇；预览不替代数据质量与污染检查。</p>`,'',null);}catch(error){showError(error);}finally{datasetMeta();}};
+$('#preview-dataset').onclick=async()=>{const id=$('#dataset_id').value;$('#preview-dataset').disabled=true;try{const data=await api('/datasets/'+id+'/preview');const d=data.dataset;openDialog('语料预览',`<b>${esc(d.name)}</b><p>${number(d.rows)} 篇 · ${size(d.bytes)} · ${date(d.created_at)}</p><div class="digest">SHA256 · ${esc(d.sha256)}</div>${data.provenance?`<div class="source-note"><b>${esc(data.provenance.source.name)}</b> · ${esc(data.provenance.split)}<br>${esc(data.provenance.source.license)}<br>${esc(data.provenance.selection)}<br><button type="button" id="export-source" class="text-button">下载来源记录 JSON</button></div>`:String()}${data.samples.map((s,i)=>`<div class="sample-heading">样本 ${i+1}${s.truncated?' · 已截断至 800 字符':''}</div><pre class="sample-text">${esc(s.text)}</pre>`).join('')}<p class="mini-note">最多显示前三篇；预览不替代数据质量与污染检查。</p>`,'',null);if($('#export-source'))$('#export-source').onclick=async()=>{try{const source=await api('/datasets/'+id+'/source');downloadBlob(new Blob([JSON.stringify(source,null,2)],{type:'application/json'}),'source-'+id.slice(0,8)+'.json');}catch(error){$('#dialog-error').textContent=error.message;$('#dialog-error').hidden=false;}};}catch(error){showError(error);}finally{datasetMeta();}};
 $('#save-draft').onclick=()=>{try{localStorage.setItem('trainlab-gpu-draft-v1',JSON.stringify(UI.draft(readConfig())));$('#draft-state').textContent='参数草稿已保存在此浏览器；不含凭据和语料内容。';toast('草稿已保存');}catch{showError('浏览器无法保存草稿，请检查存储权限');}};
 $('#restore-draft').onclick=()=>{try{const raw=localStorage.getItem('trainlab-gpu-draft-v1');if(!raw)return toast('此浏览器还没有保存的草稿');const current=readConfig();applyConfig({...UI.restore(JSON.parse(raw)),dataset_id:current.dataset_id,gpu_ids:current.gpu_ids});$('#draft-state').textContent='草稿已载入，已保留当前语料与 GPU 选择，请检查参数。';}catch{showError('草稿格式无效，请重置参数后重新保存');}};
 $('#reset-config').onclick=()=>{openDialog('重置训练参数？','<p>恢复入门模型的默认参数，保留当前数据集和 GPU 选择。已保存的本机草稿不受影响。</p>','确认重置',async()=>{const c=readConfig();applyConfig({...UI.defaults,dataset_id:c.dataset_id,gpu_ids:c.gpu_ids});});};
@@ -144,3 +144,16 @@ $('#job-search').oninput=()=>{clearTimeout(searchTimer);listRevision++;searchTim
 $('#dismiss-error').onclick=clearError;$('#logout').onclick=()=>{disconnected();clearError();};$('#retry-connection').onclick=check;$('#refresh').onclick=()=>{clearError();refresh();};
 $('#auto-refresh').onchange=()=>{if($('#auto-refresh').checked)refresh();else $('#last-sync').textContent='自动刷新已暂停';};
 setInterval(()=>{if(!document.hidden&&$('#auto-refresh').checked)refresh();},5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&$('#auto-refresh').checked)refresh();});window.addEventListener('resize',drawChart);check();
+
+$('#open-catalog').onclick=async()=>{
+  if(!canWrite)return;const version=session;$('#open-catalog').disabled=true;
+  try{
+    const sources=await api('/dataset-catalog');
+    openDialog('常用文本数据集',`<p>导入后即可选择训练。每行保留一篇完整文档，仅取小样本，不下载整库。</p><div class="catalog-grid">${sources.map(s=>`<label class="catalog-card"><input type="radio" name="catalog-source" value="${esc(s.key)}" ${s.key==='tinystories'?'checked':''}><b>${esc(s.name)}</b><small>${esc(s.language)} · ${s.network?'需服务器联网':'离线可用'}</small><p>${esc(s.description)}</p><small>${esc(s.license)}</small><a href="${esc(s.url)}" target="_blank" rel="noopener">${s.network?'官方数据卡':'查看合成示例'} ↗</a></label>`).join('')}</div><label class="field"><span>导入规模</span><select id="catalog-count"><option value="50">50 篇 · 快速试跑</option><option value="200">200 篇 · 小型实验</option><option value="500">500 篇 · 扩大样本</option></select></label><details class="catalog-rules"><summary>导入规则、许可与网络要求</summary><p class="mini-note">按源顺序取样并精确去重，最多 20 MiB；合成示例最多 240 篇。仅从公开 train 集取样，由平台重新划分训练/验证集，不代表官方基准成绩。使用与分发须遵循原数据许可。</p><p class="mini-note">联网导入通常需要数秒，最多约一分钟；关闭页面不会撤销服务器导入。相同项目、来源和规模再次导入会复用已保存数据。</p></details>`,'导入并选用',async()=>{
+      const key=$('[name="catalog-source"]:checked').value,documents=+$('#catalog-count').value;
+      $('#dialog-confirm').textContent='正在获取完整文档…';
+      try{const result=await api('/dataset-catalog/'+key+'/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({documents}),timeoutMs:90000});if(version!==session)return;datasets=await api('/datasets');paintDatasets();$('#dataset_id').value=result.id;datasetMeta();updateForm();$('#upload-state').textContent=`${result.reused?'已选用已有语料':'导入成功'} · ${result.rows} 篇 · ${size(result.bytes)}`;toast('语料已选中，可预览或配置训练');await refresh();}
+      finally{$('#dialog-confirm').textContent='导入并选用';}
+    });
+  }catch(error){showError(error);}finally{if(version===session)updateForm();}
+};

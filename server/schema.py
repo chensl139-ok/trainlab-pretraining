@@ -43,3 +43,8 @@ class TrainConfig(BaseModel):
                 'tokens_per_update': effective*self.seq_length,
                 'scheduled_tokens': effective*self.seq_length*self.max_steps,
                 'note': '参数量按请求词表上限估计；分词器实际词表可能较小。DDP 每卡保存完整模型；不是显存容量保证。'}
+
+
+class CatalogImport(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    documents: Literal[50, 200, 500] = 50

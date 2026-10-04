@@ -15,7 +15,8 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from server.manager import Manager, ROOT, gpu_inventory, now
-from server.schema import TrainConfig
+from server.schema import TrainConfig, CatalogImport
+from server.catalog import CATALOG, collect, CatalogError, MAX_OUTPUT
 from server.security import AuthStore, Principal
 
 MAX_UPLOAD = 100*1024*1024
@@ -36,6 +37,9 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     manager = Manager(state)
     identities = AuthStore(manager)
     upload_slots = threading.BoundedSemaphore(2)
+    import_slot = threading.Lock()
+    with manager.db() as db:
+        db.execute('CREATE TABLE IF NOT EXISTS dataset_sources (dataset_id TEXT PRIMARY KEY, project TEXT, catalog_key TEXT, selection INTEGER, manifest TEXT, UNIQUE(project,catalog_key,selection))')
 
     @asynccontextmanager
     async def lifespan(app):
@@ -191,7 +195,11 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                     raise HTTPException(409,'语料文件已损坏，请检查备份')
                 samples.append({'text':text[:800],'truncated':len(text)>800})
                 if len(samples)==3:break
-        return {'dataset':dict(row),'samples':samples,'preview_limit':3,'character_limit':800}
+        with manager.db() as db:
+            origin=db.execute('SELECT manifest FROM dataset_sources WHERE dataset_id=?',(did,)).fetchone()
+        provenance=json.loads(origin[0]) if origin else None
+        if provenance:provenance.pop('origins',None)
+        return {'dataset':dict(row),'samples':samples,'preview_limit':3,'character_limit':800,'provenance':provenance}
 
     @app.get('/api/overview')
     def overview(p=Depends(auth)):
@@ -210,6 +218,51 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
         if status and status not in ('queued','running','cancelling','succeeded','failed','interrupted','cancelled'):
             raise HTTPException(422,'任务状态无效')
         return manager.page_jobs(None if p.role=='admin' else p.project,q,status,offset,limit)
+
+    @app.get('/api/dataset-catalog')
+    def catalog(p=Depends(auth)):
+        return CATALOG
+
+    @app.post('/api/dataset-catalog/{key}/import')
+    def import_catalog(key: str, config: CatalogImport, p=Depends(writer)):
+        source=next((x for x in CATALOG if x['key']==key),None)
+        if not source:raise HTTPException(404,'数据源不存在')
+        if not import_slot.acquire(blocking=False):raise HTTPException(429,'已有数据集正在导入，请稍后重试')
+        did=uuid.uuid4().hex
+        path=manager.root/'datasets'/(did+'.jsonl')
+        temp=path.with_suffix('.tmp')
+        saved=False
+        try:
+            with manager.db() as db:
+                old=db.execute('SELECT d.* FROM datasets d JOIN dataset_sources s ON s.dataset_id=d.id WHERE s.project=? AND s.catalog_key=? AND s.selection=?',(p.project,key,config.documents)).fetchone()
+            if old:
+                if not (manager.root/'datasets'/(old['id']+'.jsonl')).is_file():raise HTTPException(409,'已导入的数据文件缺失，请恢复备份')
+                return {**dict(old),'reused':True}
+            if shutil.disk_usage(state).free<manager.min_free_bytes+MAX_OUTPUT:raise HTTPException(507,'磁盘空闲不足，无法导入')
+            payload,manifest=collect(source,config.documents,ROOT)
+            if shutil.disk_usage(state).free<manager.min_free_bytes+len(payload):raise HTTPException(507,'磁盘空闲不足，无法保存')
+            sha=hashlib.sha256(payload).hexdigest();created=now()
+            name=f"{source['name']} · {manifest['documents']} 篇.jsonl"
+            manifest.update(dataset_sha256=sha,imported_at=created)
+            temp.write_bytes(payload);temp.replace(path)
+            with manager.db() as db:
+                db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)',(did,name,manifest['documents'],len(payload),sha,created))
+                identities.grant(p,'dataset',did,db)
+                db.execute('INSERT INTO dataset_sources VALUES(?,?,?,?,?)',(did,p.project,key,config.documents,json.dumps(manifest,ensure_ascii=False)))
+            saved=True
+            return {'id':did,'name':name,'rows':manifest['documents'],'bytes':len(payload),'sha256':sha,'reused':False}
+        except CatalogError as exc:raise HTTPException(502,str(exc))
+        finally:
+            temp.unlink(missing_ok=True)
+            if not saved:path.unlink(missing_ok=True)
+            import_slot.release()
+
+    @app.get('/api/datasets/{did}/source')
+    def dataset_source(did: str, p=Depends(auth)):
+        identities.require(p,'dataset',did)
+        with manager.db() as db:
+            row=db.execute('SELECT manifest FROM dataset_sources WHERE dataset_id=?',(did,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     @app.post('/api/datasets')
     async def upload(request: Request, name: str='corpus.jsonl', p=Depends(writer)):
