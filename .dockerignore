@@ -10,3 +10,12 @@ state
 .venv-train
 
 .runtime-smoke.log
+
+.env.*
+!.env.example
+**/credentials
+**/*.key
+**/*.pem
+**/*.sqlite3*
+**/*.safetensors
+**/checkpoint-*

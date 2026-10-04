@@ -1,5 +1,6 @@
 # Selected CUDA 13.0 stack; validate driver and kernels on the target RTX PRO machine.
 FROM pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
+LABEL org.opencontainers.image.source="https://github.com/chensl139-ok/trainlab-pretraining"
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false HF_HOME=/state/cache TRAINLAB_STATE_DIR=/state HOME=/state
 COPY server/requirements-api.txt server/requirements-train.txt /app/server/

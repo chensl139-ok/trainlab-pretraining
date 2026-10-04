@@ -1,0 +1,47 @@
+services:
+  trainlab:
+    image: ${TRAINLAB_IMAGE:-ghcr.io/chensl139-ok/trainlab-pretraining:latest}
+    platform: linux/amd64
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    env_file: .env
+    environment:
+      TRAINLAB_ENV: production
+      TRAINLAB_STATE_DIR: /state
+      TRAINLAB_MAX_PENDING_JOBS: 20
+      TRAINLAB_MIN_FREE_BYTES: 5368709120
+      HF_HOME: /state/cache
+    ports:
+      - "${TRAINLAB_BIND:-127.0.0.1}:${TRAINLAB_PORT:-8000}:8000"
+    volumes:
+      - trainlab-state:/state
+    shm_size: 8gb
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    pids_limit: 1024
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+volumes:
+  trainlab-state:

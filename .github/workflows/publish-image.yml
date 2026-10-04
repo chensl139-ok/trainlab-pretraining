@@ -1,0 +1,95 @@
+name: Build and publish GPU image
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/publish-image.yml'
+      - 'server/**'
+      - 'scripts/**'
+      - 'dist/**'
+      - 'examples/**'
+      - 'tests/**'
+      - 'Makefile'
+permissions:
+  contents: read
+concurrency:
+  group: ghcr-publish-main
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/chensl139-ok/trainlab-pretraining
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test API, permissions and frontend logic
+        run: |
+          python3 -m venv /tmp/trainlab-tests
+          /tmp/trainlab-tests/bin/pip install -r server/requirements-api.txt pytest==9.0.3 httpx==0.28.1
+          make check PYTHON=/tmp/trainlab-tests/bin/python
+      - name: Make room for the CUDA runtime on the disposable runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Build Linux amd64 image
+        run: |
+          docker build --platform linux/amd64 \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.description="Single-node GPU text pretraining workbench" \
+            --tag "$IMAGE:sha-$GITHUB_SHA" .
+      - name: Verify training and resume in the actual image (CPU only)
+        run: |
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,size=1g,mode=1777 \
+            --tmpfs /state:rw,size=1g,uid=10001,gid=10001 \
+            --tmpfs /app/.runtime:rw,size=1g,uid=10001,gid=10001 \
+            -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+            "$IMAGE:sha-$GITHUB_SHA" python -m scripts.smoke_train
+      - name: Verify production API with read-only filesystem
+        run: |
+          docker run -d --name trainlab-check --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,size=256m,mode=1777 \
+            --tmpfs /state:rw,size=256m,uid=10001,gid=10001 \
+            -e TRAINLAB_ENV=production -e TRAINLAB_MIN_FREE_BYTES=10485760 \
+            -p 127.0.0.1:18000:8000 "$IMAGE:sha-$GITHUB_SHA"
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/api/ready; then ready=true; break; fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then docker logs trainlab-check; exit 1; fi
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18000/api/system)" = 401
+          curl --fail --silent http://127.0.0.1:18000/gpu.html > /dev/null
+          docker rm -f trainlab-check
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish tested image
+        run: |
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+          digest=$(docker image inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{index .RepoDigests 0}}')
+          {
+            echo '### Published GPU training image'
+            echo "Image: \`$IMAGE:sha-$GITHUB_SHA\`"
+            echo "Pinned digest: \`$digest\`"
+            echo 'API and offline CPU training/resume verified; GPU/CUDA/NCCL acceptance requires target hardware.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Clean up registry credentials and test container
+        if: always()
+        run: |
+          docker rm -f trainlab-check 2>/dev/null || true
+          docker logout ghcr.io
