@@ -2,6 +2,21 @@
 
 2026-10-03，macOS ARM64 / Python 3.12。目标为用户确认的 Linux + 8 张 RTX PRO 6000，第一阶段仅本人使用，尚未连接目标服务器。本版是经过加固的候选版，不能宣称达到字节内部标准或完成生产验收。
 
+## Linux Docker 镜像验证（2026-10-04）
+
+- GitHub 托管 Ubuntu 24.04 / amd64 runner 已构建实际 CUDA 镜像，基础为固定摘要的 PyTorch 2.13.0 / CUDA 13.0 runtime。应用运行在独立 virtualenv，复用基础镜像 CUDA PyTorch；移除基础镜像中与 HF Hub 的 Click 要求冲突、运行训练不需要的 spin 开发工具，并通过 pip check。safetensors 锁定同步到实际已验证的 0.8.0。
+- 30 项 pytest + 13 项 Node 测试通过。容器以 UID/GID 10001、只读根文件系统、无 Linux capabilities 和 no-new-privileges 运行，离线 CPU 训练 10 步、从 checkpoint-5 恢复到 10 步，最终模型逐项权重完全相同。
+- 生产模式容器 `/api/ready` 正常，匿名访问 `/api/system` 返回 401，GPU 工作台静态页面正常。预构建镜像 Compose 配置解析通过，并与源码版的服务保护和卷配置对比一致。
+- 已成功公开发布 `latest` 与 `sha-bcfbab1d6807f3c389762e406404ad203b0d125b`；匿名读取 manifest 和 config 成功，确认 Linux amd64、非 root 用户及源码提交一致。镜像固定引用：`ghcr.io/chensl139-ok/trainlab-pretraining@sha256:fb337020be9c4d4545b4fd7a1707a227574e2d1ac9d0c6e74858c4821341627f`。压缩层合计 3141586728 字节。
+- [构建与发布记录](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37205039663)。此记录更新了早期“未构建 Linux 镜像”的状态，不改变 GPU 实机尚未验收的边界。
+
+## 标签页登录恢复（2026-10-04）
+
+- 30 项 pytest + 13 项 Node 测试通过，JavaScript 语法检查和 pip check 通过。新增覆盖成功认证保存、主动断开清除、401 清除、网络失败保留待重试、断开后迟到响应不恢复登录，以及浏览器存储受限的降级提示。
+- 本地浏览器连接真实 API：登录后刷新自动恢复；切到 MLP 页再返回 GPU 工作台自动恢复；断开连接后刷新仍显示登录表单。
+- 凭据仅在认证成功后写入当前源、当前标签页的 sessionStorage，不写入 localStorage、URL 或参数草稿。恢复连接仍需通过服务端鉴权；断开连接和 401 清除保存值。浏览器可能恢复先前标签页会话，因此共享设备应主动断开连接，而不是仅关闭窗口。
+- 下文早期版本“仅页面内存”的验证记录属于历史状态，本次行为以此节为准。
+
 ## 常用数据集验证（2026-10-04）
 
 - 30 项 pytest + 8 项 Node 测试通过。新增覆盖目录登录要求、只读拒绝、项目隔离、重复导入复用、来源与摘要、预览源信息、非法来源/参数、网络失败清理、磁盘拒绝、整篇保留、精确去重、截断过滤、体积限制与重定向拒绝。

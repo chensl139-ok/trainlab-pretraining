@@ -64,7 +64,7 @@ docker compose -f compose.image.yaml up -d
 
 已有部署保留原 `.env`、项目目录及 `trainlab-state` 数据卷；不要重复签发同名凭据文件，也不要用 `down -v` 删除数据。升级前停机备份，再 `pull` 和 `up -d`。`compose.image.yaml` 与源码构建版的服务、卷名相同，请在同一项目目录执行并保持原 Compose 项目名。可以在 `.env` 设置 `TRAINLAB_IMAGE=ghcr.io/chensl139-ok/trainlab-pretraining@sha256:实际摘要`。
 
-如果 GHCR 包尚未设为公开，拉取需具有 `read:packages` 的 GitHub 凭据；仓库公开与镜像包公开是两项独立设置。首次发布状态以 Actions 成功结果为准。
+[GHCR 镜像包](https://github.com/chensl139-ok/trainlab-pretraining/pkgs/container/trainlab-pretraining) 已公开，已验证匿名读取镜像 manifest，无需 GitHub 登录即可拉取。首次镜像压缩层合计约 3.14 GB；服务器还需预留解压、镜像更新及训练数据空间。发布摘要与验证记录见 [VALIDATION.md](VALIDATION.md)。
 
 ## 在服务器从源码部署
 
