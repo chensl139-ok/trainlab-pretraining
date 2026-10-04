@@ -9,11 +9,15 @@ let token='',connected=false,canWrite=false,session=0,system=null,datasets=[],se
 let refreshing=false,submitting=false,mutating=false,uploading=false,uploadRequest=null,selectedFile=null;
 let offset=0,total=0,pageSize=12,listRevision=0,detailRevision=0,activeTab='metrics',pendingSubmission=null,dialogAction=null,dialogBusy=false,refreshQueued=false;
 const requests=new Set();let toastTimer,searchTimer;
+const credentialKey='trainlab-tab-credential-v1';
+function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
+function saveCredential(value){try{sessionStorage.setItem(credentialKey,value);return true;}catch{return false;}}
+function clearCredential(){try{sessionStorage.removeItem(credentialKey);}catch{}}
 function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').classList.add('show');toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4200);}
 function showError(error){if(error?.stale)return;$('#error-text').textContent=typeof error==='string'?error:error.message;$('#error-banner').hidden=false;}
 function clearError(){$('#error-banner').hidden=true;}
 function disconnected(message='已断开连接，服务端任务继续运行'){
-  session++;token='';connected=false;canWrite=false;system=null;datasets=[];selectedJob=null;detailData=null;selectedFile=null;pendingSubmission=null;
+  clearCredential();session++;token='';connected=false;canWrite=false;system=null;datasets=[];selectedJob=null;detailData=null;selectedFile=null;pendingSubmission=null;
   requests.forEach(c=>c.abort());requests.clear();if(uploadRequest)uploadRequest.abort();uploadRequest=null;uploading=false;
   $('#console').hidden=true;$('#login').hidden=false;$('#logout').hidden=true;$('#refresh').hidden=true;$('#token').value='';$('#connection').textContent='未连接';$('#notice').textContent=message;
   $('#action-dialog').close();$('#job-detail').hidden=true;$('#detail-empty').hidden=false;$('#corpus-file').value='';$('#jobs').replaceChildren();$('#job-log').textContent='';$('#job-config').textContent='';$('#metric-rows').replaceChildren();$('#artifact-list').replaceChildren();delete $('#artifact-list').dataset.signature;$('#dataset_id').innerHTML='<option value="">连接后选择语料</option>';$('#gpu-select').replaceChildren();$('#dialog-body').replaceChildren();$('#upload-progress').hidden=true;$('#cancel-upload').hidden=true;$('#file-name').textContent='UTF-8 编码 · .jsonl';
@@ -35,16 +39,18 @@ async function api(path,options={}){
 }
 async function check(){
   $('#retry-connection').disabled=true;$('#offline').hidden=true;$('#notice').textContent='正在检查训练服务…';
-  try{const r=await fetch('/api/health',{signal:AbortSignal.timeout(8000)}),health=await r.json();if(!r.ok||health.service!=='trainlab-pretraining')throw new Error();$('#login').hidden=false;$('#connection').textContent='服务在线 · 待认证';$('#notice').textContent='训练服务可连接。输入个人凭据后查看机器资源与实验。';}
+  try{const r=await fetch('/api/health',{signal:AbortSignal.timeout(8000)}),health=await r.json();if(!r.ok||health.service!=='trainlab-pretraining')throw new Error();$('#login').hidden=false;$('#connection').textContent='服务在线 · 待认证';$('#notice').textContent='训练服务可连接。输入个人凭据后查看机器资源与实验。';const saved=savedCredential();if(saved)await connect(saved,true);}
   catch{$('#login').hidden=true;$('#offline').hidden=false;$('#connection').textContent='未连接 GPU 机器';$('#notice').textContent='当前未连接训练后端。请部署到 Linux 机器，或检查服务器与 SSH 隧道。';}
   finally{$('#retry-connection').disabled=false;}
 }
-$('#login').onsubmit=async event=>{
-  event.preventDefault();if($('#login-button').disabled)return;session++;token=$('#token').value.trim();$('#login-button').disabled=true;$('#login-button').textContent='连接中…';clearError();
-  try{const data=await api('/system');connected=true;$('#token').value='';$('#login').hidden=true;$('#offline').hidden=true;$('#console').hidden=false;$('#logout').hidden=false;$('#refresh').hidden=false;paintSystem(data,true);offset=0;await refresh();}
-  catch(error){if(!error.stale){token='';showError(error);}}
+async function connect(credential,restoring=false){
+  if($('#login-button').disabled)return;session++;const version=session;token=credential;$('#login-button').disabled=true;$('#login-button').textContent=restoring?'恢复连接中…':'连接中…';clearError();
+  if(restoring)$('#notice').textContent='正在恢复当前标签页的登录状态…';
+  try{const data=await api('/system');if(version!==session)return;connected=true;const remembered=saveCredential(token);$('#token').value='';$('#login').hidden=true;$('#offline').hidden=true;$('#console').hidden=false;$('#logout').hidden=false;$('#refresh').hidden=false;paintSystem(data,true);offset=0;await refresh();if(!remembered&&connected)toast('浏览器禁止会话存储，本次连接有效，刷新后需要重新输入凭据');}
+  catch(error){if(!error.stale){if(version===session){token='';connected=false;}showError(error);if(restoring&&savedCredential())$('#notice').textContent='暂时无法恢复连接，已保留本标签页凭据；请检查网络后刷新重试。';}}
   finally{$('#login-button').disabled=false;$('#login-button').textContent='连接训练服务 →';}
-};
+}
+$('#login').onsubmit=event=>{event.preventDefault();connect($('#token').value.trim());};
 function paintSystem(data,initial=false){
   system=data;canWrite=['admin','operator'].includes(data.identity?.role);const identity=data.identity;
   $('#connection').textContent=identity?`${identity.subject} · ${identity.role==='viewer'?'只读':identity.project}`:'已连接';

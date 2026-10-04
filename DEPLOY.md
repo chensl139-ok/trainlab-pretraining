@@ -85,7 +85,7 @@ docker compose logs --tail=100 trainlab
 ssh -N -L 8000:127.0.0.1:8000 your-user@your-server
 ```
 
-浏览器打开 `http://127.0.0.1:8000/gpu.html`，输入分配给本人的个人凭据。浏览器只请求同源 API，令牌仅存在页面内存，刷新后重新输入。现有 chatgpt.site 地址只提供界面预览，不代理访问你的服务器。
+浏览器打开 `http://127.0.0.1:8000/gpu.html`，输入分配给本人的个人凭据。浏览器只请求同源 API，凭据保存在当前标签页的 sessionStorage，刷新或同标签页导航返回会重新验证并恢复登录；断开连接或 API 返回 401 时清除。浏览器禁止会话存储时会提示退回仅本次页面连接。现有 chatgpt.site 地址只提供界面预览，不代理访问你的服务器。
 
 如需局域网直连，可在 `.env` 将 `TRAINLAB_BIND` 改为机器的内网 IP，并配置访问范围；令牌不应通过不可信的明文网络传输。团队/公网访问建议使用下节 HTTPS 入口。
 
@@ -176,13 +176,13 @@ python3 -m venv .venv
 1. 连接后先检查计算资源与磁盘水位；无可用 GPU、调度器未就绪、配置非法或只读角色时，提交按钮不可用。
 2. 上传语料后点击「预览语料」，查看 SHA256 和前三篇文本。每篇最多 800 字符，服务端最多扫描 64 行；这不是完整数据质量检查。
 3. 模型起点可选预设或自定义。高级参数允许调整层数、隐藏维度、头数、随机种子、warmup、weight decay 和激活检查点；保存与评估间隔各自独立。
-4. 「保存本机草稿」只在明确点击后写入浏览器 localStorage，包含任务名和训练参数，不包含凭据、数据内容、数据集 ID 或 GPU 选择；载入时保留当前数据集与 GPU。凭据仍只保存在页面内存中。
+4. 「保存本机草稿」只在明确点击后写入浏览器 localStorage，包含任务名和训练参数，不包含凭据、数据内容、数据集 ID 或 GPU 选择；载入时保留当前数据集与 GPU。凭据独立保存在当前标签页 sessionStorage，不写入参数草稿或 localStorage。
 5. 「复用配置」把历史任务的完整配置放回表单，生成副本名称；不会立即开始训练。请确认数据集权限、GPU 和运行时限后提交。提交失败重试保留相同幂等标识，刷新页面后应先检查任务列表。
 6. 任务按名称或 ID 搜索、按状态筛选，每页 12 条。统计显示当前身份可访问的全部任务，不受分页影响。管理员可查看所有项目。
 7. 任务详情分为指标、日志、配置、模型文件。取消「跟随最新」可阅读已有日志；关闭自动刷新可暂停轮询。指标 CSV 导出的是接口当前返回的记录，日志导出的是当前尾部（最多 128 KiB），都不是无限历史。
 8. 支持导出配置 JSON 与指标 CSV，浏览器阻止下载时请查看下载设置或使用带鉴权的 API。大于 256 MiB 的文件仍需服务器复制。
 
-更新此版前等待当前训练完成或主动停止并确认检查点，按 PRODUCTION.md 做停机备份，再执行 `git pull --ff-only` 和 `docker compose up -d --build`。本版不改变数据库结构或训练依赖，前端与 API 必须一起更新；浏览器刷新后重新输入凭据。
+更新此版前等待当前训练完成或主动停止并确认检查点，按 PRODUCTION.md 做停机备份，再执行 `git pull --ff-only` 和 `docker compose up -d --build`。本版不改变数据库结构或训练依赖，前端与 API 必须一起更新；浏览器刷新后会使用当前标签页凭据重新验证并恢复连接。
 
 开发校验增加 `node --test tests/ui.test.cjs`，可用 `make check PYTHON=.venv/bin/python` 一并运行 API/权限测试、前端逻辑测试、语法检查与 pip 依赖检查。需要支持 node:test 的 Node.js。
 
@@ -198,3 +198,12 @@ python3 -m venv .venv
 来源记录保存在 SQLite 的 `dataset_sources` 表，自动建表且不修改旧记录；停机备份会覆盖此表和语料文件。`GET /api/datasets/{id}/source` 返回来源记录，遵循原数据集项目权限。相同项目、来源和规模的重复请求复用先前保存的数据，不自动更新远端快照。导入只能由 admin/operator 操作；viewer 可以预览与查看来源。
 
 已保存文档摘要对应本地 JSONL，可追溯本次输入。远端 Viewer 返回的当前数据不是按提交 SHA 固定的下载，因此跨时间重新导入不保证相同；可复现实验应备份既有数据和数据库。本文网络接口参考：https://huggingface.co/docs/dataset-viewer/rows 。
+
+
+## GHCR 预构建镜像
+
+使用 `compose.image.yaml` 可以直接拉取 `ghcr.io/chensl139-ok/trainlab-pretraining:latest`，无需在服务器构建。全部 Compose 操作均加上 `-f compose.image.yaml`。首次部署与更新步骤见 README「从 GitHub 镜像部署」。服务仍需 NVIDIA Container Toolkit、符合 CUDA 13.0 要求的宿主驱动、GPU 与磁盘验收。
+
+发布 workflow 仅在 main 运行，构建 Linux amd64，先执行测试与镜像内离线 CPU smoke，再验证只读文件系统下的生产模式 API、匿名鉴权拒绝，最后推送完整提交 SHA 和 latest 标签。源标签可追溯，digest 用于内容固定；latest 会随成功发布改变。下载本身不需要源码仓库写权限。
+
+`compose.image.yaml` 不带 build 字段，保留 GPU 挂载、单用户凭据、只读文件系统、资源限制、健康检查和持久卷。不要切换项目目录或 Compose 项目名后误以为原数据消失；已有数据卷属于原项目名。升级前先完成当前任务或确认可恢复检查点，并按生产手册备份。

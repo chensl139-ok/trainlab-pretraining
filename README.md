@@ -29,7 +29,7 @@
 
 学习页与 GPU 页使用一致的导航名称和顺序，按服务器训练、浏览器学习实验、学习资料分组。当前页重复点击不会重置或刷新；教学模块切换支持浏览器返回/前进，知识库章节可直接链接。微调练习参数在同一页面内切换后保留。手机端使用带文字的抽屉导航，支持 Esc、遮罩关闭和键盘焦点约束。
 
-跨到 GPU 页面或离开 GPU 页面仍属于整页导航；GPU 凭据只在页面内存中，重新进入后需要连接，服务端训练不受影响。部署和运维资料在新标签页打开。
+跨到 GPU 页面或离开 GPU 页面仍属于整页导航；GPU 凭据保存在当前标签页 sessionStorage，刷新或同标签页返回会验证并恢复连接；断开连接或凭据失效时清除，服务端训练不受影响。部署和运维资料在新标签页打开。
 
 ## v4 工作台更新
 
@@ -41,7 +41,32 @@
 
 所有任务和资源数字来自 API。无 GPU 时可以准备数据和参数，不能提交训练。详见 [验证记录](VALIDATION.md)。
 
-## 在服务器部署
+## 从 GitHub 镜像部署
+
+GPU 镜像由 [GitHub Actions](https://github.com/chensl139-ok/trainlab-pretraining/actions/workflows/publish-image.yml) 构建并发布到 `ghcr.io/chensl139-ok/trainlab-pretraining`，目标架构为 **Linux amd64**。只有通过 API/权限/前端测试、镜像内 CPU 训练恢复检查及生产模式 API 启动检查的镜像才会推送。CI 没有 GPU，因此不代表 CUDA/NCCL 实机验收。
+
+- `latest`：最近成功发布的主分支构建。
+- `sha-<完整提交 SHA>`：对应源码提交的镜像标签；正式部署建议使用构建摘要中的 `@sha256:...` 固定镜像。
+- 源码或 Dockerfile 更新会自动构建，也可以在 Actions 手动运行。发布使用短期 `GITHUB_TOKEN`，不需要把个人访问令牌提交到仓库。
+
+首次部署，在已安装 NVIDIA Container Toolkit 的 Linux 服务器执行：
+
+```bash
+git clone https://github.com/chensl139-ok/trainlab-pretraining.git
+cd trainlab-pretraining
+python3 scripts/init_env.py
+docker compose -f compose.image.yaml pull
+docker compose -f compose.image.yaml run --rm trainlab python scripts/preflight.py
+docker compose -f compose.image.yaml run --rm trainlab torchrun --standalone --nproc_per_node=8 scripts/ddp_check.py
+docker compose -f compose.image.yaml run --rm trainlab python -m scripts.users issue --subject admin --project research --role admin --credential-file /state/credentials/admin.key
+docker compose -f compose.image.yaml up -d
+```
+
+已有部署保留原 `.env`、项目目录及 `trainlab-state` 数据卷；不要重复签发同名凭据文件，也不要用 `down -v` 删除数据。升级前停机备份，再 `pull` 和 `up -d`。`compose.image.yaml` 与源码构建版的服务、卷名相同，请在同一项目目录执行并保持原 Compose 项目名。可以在 `.env` 设置 `TRAINLAB_IMAGE=ghcr.io/chensl139-ok/trainlab-pretraining@sha256:实际摘要`。
+
+如果 GHCR 包尚未设为公开，拉取需具有 `read:packages` 的 GitHub 凭据；仓库公开与镜像包公开是两项独立设置。首次发布状态以 Actions 成功结果为准。
+
+## 在服务器从源码部署
 
 这是公开仓库，服务器可直接通过 HTTPS 克隆，无需 GitHub 登录。训练服务仍需要个人凭据；公开源码不会开放服务器上的语料、模型或任务。
 

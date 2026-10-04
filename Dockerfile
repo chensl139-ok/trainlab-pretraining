@@ -4,6 +4,9 @@ LABEL org.opencontainers.image.source="https://github.com/chensl139-ok/trainlab-
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false HF_HOME=/state/cache TRAINLAB_STATE_DIR=/state HOME=/state
 # Reuse CUDA-enabled PyTorch; install app packages in an isolated virtualenv.
+# The base's unused spin build tool pins Click below the version required by HF Hub.
+# Remove only that development tool from this image; keep the CUDA runtime intact.
+RUN python3 -m pip uninstall --break-system-packages -y spin
 RUN apt-get update && apt-get install -y --no-install-recommends python3-venv && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv --system-site-packages /opt/trainlab-venv
 ENV PATH="/opt/trainlab-venv/bin:${PATH}"
