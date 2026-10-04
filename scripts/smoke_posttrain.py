@@ -15,6 +15,8 @@ def run(base, config, work, env):
     from server.manager import Manager
     from server.model_registry import import_model,get_model
     manager=Manager(work/'registry-fixture')
+    # CI mounts only a 1 GiB tmpfs; keep the production default untouched.
+    manager.min_free_bytes=10*1024**2
     imported=import_model(manager,base,'smoke','Qwen/Qwen3-0.6B-Base','local-test-fixture',context=config['seq_length'])
     registered=get_model(manager,imported['id'],'smoke')
     base=Path(registered['path'])
