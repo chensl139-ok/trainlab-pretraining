@@ -2,6 +2,13 @@
 
 2026-10-03，macOS ARM64 / Python 3.12。目标为用户确认的 Linux + 8 张 RTX PRO 6000，第一阶段仅本人使用，尚未连接目标服务器。本版是经过加固的候选版，不能宣称达到字节内部标准或完成生产验收。
 
+## v5 镜像发布证据（2026-10-04）
+
+- [GitHub Actions 37206569821](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37206569821) 成功，Linux amd64 镜像内三种架构的 CPU 训练/恢复权重一致、续写和评分均通过；生产 API 在非 root、只读根文件系统下启动，未认证请求返回 401。
+- 镜像源码：`93ea8f8281ea874613ca4aeabcad449709db1933`。
+- 公开镜像：`ghcr.io/chensl139-ok/trainlab-pretraining:latest`；固定摘要：`ghcr.io/chensl139-ok/trainlab-pretraining@sha256:0bd892d11d91284fd2669efc8556b3c5e8bb4c01fba405289800acc764f55cb3`。
+- 发布后匿名读取 GHCR manifest 与配置 blob，核对镜像 revision 与本次提交一致。未在本机执行完整 docker pull（无 Docker daemon），不把 manifest 验证表述为目标服务器拉取或 GPU 验收。
+
 ## v5 架构、模型测试与 ModelScope（2026-10-04）
 
 - 37 项 pytest + 14 项 Node 测试、前端语法和 pip check 通过。覆盖旧配置兼容、现代架构约束、项目与角色隔离、跨项目评估拒绝、幂等提交、完整检查点、路径限制、共享队列、真实子进程执行/取消、环境隔离与包含 tests 目录的备份恢复。
