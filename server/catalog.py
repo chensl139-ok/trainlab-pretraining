@@ -1,8 +1,8 @@
 """Small, document-preserving samples from a fixed public dataset catalog.
 
 No arbitrary URLs, remote dataset scripts, private credentials, or split mixing.
-The Viewer serves mutable snapshots: the manifest records hashes and row origins,
-not a claim of revision-pinned upstream reproducibility.
+ModelScope streams bounded JSONL prefixes. Local samples and provenance are hashed;
+mutable upstream branches are never described as revision-pinned snapshots.
 """
 import hashlib
 import json
@@ -13,11 +13,11 @@ import urllib.request
 from pathlib import Path
 
 CATALOG = [
-    dict(key='sample',name='合成流程示例',language='中文',dataset='trainlab/sample-corpus',config='local',license='项目自带合成示例',url='/sample-corpus.jsonl',description='离线可用，用于检查上传、分词、训练和恢复流程，不用于模型能力评估。',network=False),
-    dict(key='tinystories',name='TinyStories',language='英文',dataset='roneneldan/TinyStories',config='default',license='CDLA-Sharing-1.0',url='https://huggingface.co/datasets/roneneldan/TinyStories',description='词汇较简单的合成短故事；适合小语言模型从零预训练入门。',network=True),
-    dict(key='wikipedia-zh',name='Wikipedia 中文',language='中文',dataset='wikimedia/wikipedia',config='20231101.zh',license='CC BY-SA 3.0 / GFDL（数据卡标注）',url='https://huggingface.co/datasets/wikimedia/wikipedia',description='2023-11-01 中文百科快照，整篇文章作为文档，适合中文分词与预训练实验。',network=True),
-    dict(key='wikipedia-en',name='Wikipedia 英文',language='英文',dataset='wikimedia/wikipedia',config='20231101.en',license='CC BY-SA 3.0 / GFDL（数据卡标注）',url='https://huggingface.co/datasets/wikimedia/wikipedia',description='2023-11-01 英文百科快照；篇幅较长，可用于观察上下文长度与训练成本。',network=True),
+    dict(key='ms-mini-pretrain',name='中文预训练样本',language='中文',provider='ModelScope',dataset='BazingaLyn/mini_pretrain_dataset',file='pretrain_hq_v7.jsonl',revision='master',license='Apache-2.0（数据卡标注）',url='https://modelscope.cn/datasets/BazingaLyn/mini_pretrain_dataset',description='整理为 text 字段的中文预训练语料；按完整行读取小样本，不下载整个 4 GB 文件。',network=True),
+    dict(key='ms-minimind',name='MiniMind 轻量预训练',language='中文 / 英文',provider='ModelScope',dataset='gongjy/minimind_dataset',file='pretrain_t2t_mini.jsonl',revision='master',license='CC-BY-NC-4.0（非商业，数据卡标注）',url='https://modelscope.cn/datasets/gongjy/minimind_dataset',description='中英混合、已整理为 text 的训练语料；仅供符合数据许可的学习与实验。',network=True),
+    dict(key='sample',name='合成流程示例',language='中文',provider='本地',dataset='trainlab/sample-corpus',config='local',license='项目自带合成示例',url='/sample-corpus.jsonl',description='完全离线，用于检查上传、分词、训练和恢复流程，不用于模型能力评估。',network=False),
 ]
+
 MAX_RESPONSE=8*1024*1024
 MAX_OUTPUT=20*1024*1024
 
@@ -26,37 +26,53 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,req,fp,code,msg,headers,newurl):
         raise CatalogError('数据源发生重定向，已停止导入；请从官方来源下载后上传')
 
-def fetch_rows(source,offset,length,deadline):
-    remaining=deadline-time.monotonic()
-    if remaining<=0:raise CatalogError('导入超时，请选择较小样本后重试')
-    query=urllib.parse.urlencode(dict(dataset=source['dataset'],config=source['config'],split='train',offset=offset,length=length))
-    req=urllib.request.Request('https://datasets-server.huggingface.co/rows?'+query,headers={'User-Agent':'TrainLab/4 dataset-import','Accept':'application/json'})
+class ModelScopeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        url=urllib.parse.urlparse(newurl)
+        if url.scheme!='https' or url.hostname not in {'modelscope.cn','www.modelscope.cn','cdn-lfs-cn-1.modelscope.cn'} or url.username or url.password or url.port not in (None,443):
+            raise CatalogError('ModelScope 下载跳转到了未允许的域名，请从数据卡下载后上传')
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+def fetch_modelscope(source,count,deadline):
+    query=urllib.parse.urlencode({'Revision':source['revision'],'FilePath':source['file']})
+    url='https://modelscope.cn/api/v1/datasets/'+source['dataset']+'/repo?'+query
+    req=urllib.request.Request(url,headers={'User-Agent':'TrainLab/5 dataset-import','Accept':'application/octet-stream','Range':f'bytes=0-{MAX_OUTPUT-1}','Accept-Encoding':'identity'})
+    rows=[];scanned=0;received=0;prefix=hashlib.sha256();etag=None
     try:
-        with urllib.request.build_opener(NoRedirect).open(req,timeout=min(10,remaining)) as response:
-            body=bytearray()
-            while True:
+        with urllib.request.build_opener(ModelScopeRedirect).open(req,timeout=min(10,max(.1,deadline-time.monotonic()))) as response:
+            if response.status==206 and not response.headers.get('Content-Range','').startswith('bytes 0-'):
+                raise CatalogError('数据源返回的字节范围不一致')
+            if response.headers.get('Content-Encoding','identity')!='identity':raise CatalogError('数据源返回了不支持的压缩流')
+            etag=response.headers.get('ETag')
+            # Stop on whole JSONL documents, bounded even if the host ignores Range.
+            while scanned<5000 and len(rows)<min(600,count+100):
                 if time.monotonic()>deadline:raise CatalogError('导入超时，请选择较小样本后重试')
-                chunk=response.read(65536)
-                if not chunk:break
-                body.extend(chunk)
-                if len(body)>MAX_RESPONSE:raise CatalogError('数据源单页过大，请下载后按文档整理并上传')
-        result=json.loads(body)
-        if not isinstance(result,dict) or not isinstance(result.get('rows'),list):raise ValueError()
-        return result
+                raw=response.readline(min(1024*1024+1,MAX_OUTPUT-received+1))
+                if not raw:break
+                received+=len(raw);prefix.update(raw);scanned+=1
+                if received>MAX_OUTPUT:break
+                if len(raw)>1024*1024:raise CatalogError('数据源单篇文档超过 1 MiB，请整理后上传')
+                if not raw.endswith(b'\n'):break # Never accept a partial Range response as a document.
+                try:
+                    row=json.loads(raw)
+                    if not isinstance(row,dict):raise ValueError()
+                except (ValueError,UnicodeError):raise CatalogError('ModelScope 文件不是有效的 JSONL 文本数据')
+                rows.append({'row_idx':scanned-1,'row':row})
+        return {'rows':rows,'num_rows_total':len(rows),'downloaded_bytes':received,'prefix_sha256':prefix.hexdigest(),'etag':etag}
     except CatalogError:raise
     except (OSError,ValueError) as exc:
-        raise CatalogError('无法读取 Hugging Face 数据源，请检查服务器外网连接后重试，或下载 JSONL 后上传') from exc
+        raise CatalogError('无法读取 ModelScope 数据源，请检查 modelscope.cn 与 cdn-lfs-cn-1.modelscope.cn 的 HTTPS 连通性，或下载 JSONL 后上传') from exc
 
 def collect(source,count,root):
     deadline=time.monotonic()+60
     texts=[];origins=[];seen=set();size=0;skipped=0;responses=[];offset=0
     local=source['key']=='sample'
-    for page in range(12):
+    for page in range(1):
         if time.monotonic()>deadline:raise CatalogError('导入超时，请选择较小样本后重试')
         if local:
             rows=[{'row_idx':i,'row':json.loads(line)} for i,line in enumerate((Path(root)/'examples/sample-corpus.jsonl').read_text().splitlines()) if line.strip()]
             result={'rows':rows,'num_rows_total':len(rows)}
-        else:result=fetch_rows(source,offset,min(50,count-len(texts)),deadline)
+        else:result=fetch_modelscope(source,count,deadline)
         rows=result['rows']
         if not all(isinstance(x,dict) and isinstance(x.get('row'),dict) for x in rows):raise CatalogError('数据源格式变化，请检查官方数据卡')
         if not rows:break
@@ -77,5 +93,5 @@ def collect(source,count,root):
         offset+=len(rows)
         if local or len(texts)==count or offset>=result.get('num_rows_total',offset):break
     if len(texts)<20:raise CatalogError('可用完整文档不足 20 篇，无法用于当前训练流程')
-    manifest={'schema_version':1,'source':source,'split':'local' if local else 'train','requested_documents':count,'documents':len(texts),'skipped':skipped,'selection':'从起始位置顺序取完整文档；非随机、非完整数据集','upstream_revision':'local' if local else 'Dataset Viewer 当前快照；不保证固定上游版本','response_sha256':responses,'origins':origins,'evaluation':'平台按完整文档重新划分训练/验证集；不是官方测试集成绩'}
+    manifest={'schema_version':1,'source':source,'split':'local' if local else 'pretraining_file','requested_documents':count,'documents':len(texts),'skipped':skipped,'selection':'从起始位置顺序取完整文档；非随机、非完整数据集','upstream_revision':'local' if local else source['revision']+'（可变分支，使用本地样本摘要复现）','upstream_file':source.get('file'),'upstream_etag':result.get('etag'),'downloaded_prefix_sha256':result.get('prefix_sha256'),'response_sha256':responses,'origins':origins,'evaluation':'平台按完整文档重新划分训练/验证集；不是官方测试集成绩'}
     return b''.join(texts),manifest

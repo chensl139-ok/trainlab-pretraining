@@ -15,9 +15,10 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from server.manager import Manager, ROOT, gpu_inventory, now
-from server.schema import TrainConfig, CatalogImport
+from server.schema import TrainConfig, CatalogImport, ModelTestConfig
 from server.catalog import CATALOG, collect, CatalogError, MAX_OUTPUT
 from server.security import AuthStore, Principal
+from server.architectures import ARCHITECTURES
 
 MAX_UPLOAD = 100*1024*1024
 AUDIT_LOG = logging.getLogger('trainlab.audit')
@@ -118,7 +119,7 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
 
     @app.get('/api/health')
     def health():
-        return {'service':'trainlab-pretraining','version':4,'auth_required':True}
+        return {'service':'trainlab-pretraining','version':5,'auth_required':True}
 
     @app.get('/api/ready')
     def ready():
@@ -152,12 +153,16 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     @app.get('/api/system')
     def system(p=Depends(auth)):
         return {**gpu_inventory(), 'scheduler':'single_job_queue', 'max_upload_mib':100,
-                'backend':'GPT-2 from scratch + byte-level BPE + PyTorch DDP',
-                'active_job_id':manager.active_id if manager.active_id and identities.allowed(p,'job',manager.active_id) else None,
+                'backend':'Qwen3.5 / Qwen3 / GPT-2 from scratch + byte-level BPE + PyTorch DDP',
+                'active_job_id':manager.active_id if manager.active_kind=='jobs' and identities.allowed(p,'job',manager.active_id) else None,
                 'identity':{'subject':p.subject,'role':p.role,'project':p.project},
                 'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes},
                 'scheduler_alive':bool(manager.thread and manager.thread.is_alive()),
                 'disk':dict(zip(('total','used','free'),shutil.disk_usage(state)))}
+
+    @app.get('/api/architectures')
+    def architectures(p=Depends(auth)):
+        return ARCHITECTURES
 
     @app.get('/api/datasets')
     def datasets(p=Depends(auth)):
@@ -346,6 +351,12 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
         found = job(jid,p)
         folder = manager.jobdir(jid)
         found['checkpoints'] = [p.name for p in manager.checkpoints(jid)]
+        found['testable_models']=[]
+        for name in ['final',*reversed(found['checkpoints'])]:
+            try:
+                manager.test_model_path(found,name)
+                found['testable_models'].append(name)
+            except ValueError:pass
         found['metrics'] = []
         mp = folder/'metrics.jsonl'
         if mp.exists():
@@ -362,6 +373,35 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
         found['summary'] = json.loads(summary.read_text()) if summary.exists() else None
         found['artifacts'] = [{'path':str(p.relative_to(folder/'output')),'bytes':p.stat().st_size} for p in (folder/'output').rglob('*') if p.is_file() and not p.is_symlink() and 'checkpoint-' not in str(p.relative_to(folder/'output'))] if (folder/'output').exists() else []
         return found
+
+    @app.post('/api/jobs/{jid}/tests')
+    def create_model_test(jid: str, config: ModelTestConfig, idempotency_key: str = Header(default=None), p=Depends(writer)):
+        job(jid,p)
+        if config.dataset_id:
+            identities.require(p,'dataset',config.dataset_id)
+            with manager.db() as db:
+                job_acl=db.execute("SELECT project FROM resource_acl WHERE kind='job' AND id=?",(jid,)).fetchone()
+                data_acl=db.execute("SELECT project FROM resource_acl WHERE kind='dataset' AND id=?",(config.dataset_id,)).fetchone()
+            if not job_acl or not data_acl or job_acl['project']!=data_acl['project']:
+                raise HTTPException(422,'评估语料必须属于训练任务的同一项目')
+        if config.device=='cuda' and config.gpu_id not in {g['index'] for g in gpu_inventory()['gpus']}:
+            raise HTTPException(422,'所选测试 GPU 不可用')
+        if idempotency_key and not re.fullmatch(r'[a-f0-9-]{32,36}',idempotency_key):raise HTTPException(422,'提交标识无效')
+        key=hashlib.sha256((p.subject+'\0'+p.project+'\0'+jid+'\0'+idempotency_key).encode()).hexdigest() if idempotency_key else None
+        try:return manager.create_test(jid,config.model_dump(),key)
+        except ValueError as e:raise HTTPException(422,str(e))
+
+    @app.get('/api/jobs/{jid}/tests')
+    def model_tests(jid: str, p=Depends(auth)):
+        job(jid,p)
+        return manager.list_tests(jid)
+
+    @app.post('/api/jobs/{jid}/tests/{tid}/cancel')
+    def cancel_model_test(jid: str, tid: str, p=Depends(writer)):
+        job(jid,p)
+        found=manager.get_test(tid)
+        if not found or found['job_id']!=jid:raise HTTPException(404,'测试不存在')
+        return manager.cancel_test(tid)
 
     @app.get('/api/jobs/{jid}/logs', dependencies=[Depends(auth)])
     def logs(jid: str, p=Depends(auth)):

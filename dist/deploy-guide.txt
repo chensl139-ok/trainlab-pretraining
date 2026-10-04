@@ -1,17 +1,17 @@
 # TrainLab 单机 GPU 预训练部署
 
-适用：Linux x86_64 + NVIDIA GPU，用户目标为 8 张 RTX PRO 6000。实际型号、显存、驱动、系统内存和磁盘需要在机器上确认。本包实现从随机权重初始化 GPT 文本模型，不下载基础模型、不做 LoRA。
+适用：Linux x86_64 + NVIDIA GPU，用户目标为 8 张 RTX PRO 6000。实际型号、显存、驱动、系统内存和磁盘需要在机器上确认。本包实现从随机权重初始化 Qwen3.5 / Qwen3 / GPT-2 文本模型，不下载基础模型、不做 LoRA。
 
 ## 当前能力和边界
 
-- 字节级 BPE 分词器只用训练集学习；GPT-2 架构随机初始化。
+- 字节级 BPE 分词器只用训练集学习；可选择 Qwen3.5 文本稠密混合注意力、Qwen3 稠密、GPT-2 架构随机初始化。
 - 每行一篇文档的 UTF-8 JSONL；上传上限 100 MiB；按文档精确去重，seeded SHA256 约 90/10 划分训练和验证。
 - EOS 连接文档，连续定长打包，丢弃末尾不足一段的 token；相邻文档之间没有额外 attention 隔离。
 - 1 至 8 张 GPU 的单机 DDP、BF16/FP32、梯度累积、激活检查点、AdamW 和 cosine 调度。
 - 串行持久任务队列；训练日志、loss、验证 perplexity、模型文件下载；完整检查点恢复。
 - 个人 API 凭据、admin/operator/viewer 三角色、项目级 API 权限、凭据过期与吊销、请求审计。第一阶段仅供本人使用，权限模型为未来可信团队协作保留；尚无 SSO、进程/文件系统租户隔离或高可用。
-- 不包含模型推理 API。训练产物是 Hugging Face 模型与分词器目录；对外推理服务需单独部署。
-- 不是海量语料预训练集群：尚无流式/分片语料、对象存储、FSDP/ZeRO、跨节点训练、自动评测与模型服务。
+- 提供任务内续写与 Loss/PPL 测试 API；不包含对外在线推理服务。训练产物是 Hugging Face 模型与分词器目录；对外推理服务需单独部署。
+- 不是海量语料预训练集群：尚无流式/分片语料、对象存储、FSDP/ZeRO、跨节点训练、业务基准评测流水线与对外模型服务。
 
 8 卡 DDP 在每张卡保存完整模型。8×单卡显存不是一块可任意使用的合并显存，也不能据此保证某个大模型能训练。先单卡、短序列、小模型实测，再增加规模；PCIe 拓扑和通信会影响扩卡收益。
 
@@ -187,14 +187,37 @@ python3 -m venv .venv
 开发校验增加 `node --test tests/ui.test.cjs`，可用 `make check PYTHON=.venv/bin/python` 一并运行 API/权限测试、前端逻辑测试、语法检查与 pip 依赖检查。需要支持 node:test 的 Node.js。
 
 
-## 常用数据集导入（2026-10-04）
+## v5 架构与训练后测试
 
-登录 GPU 工作台后，在「准备语料」选择常用数据集，默认导入 50 篇并自动选用。用户可选择 200 或 500 篇；源已耗尽或部分文档被过滤时，以实际导入数量为准。合成流程示例随镜像提供，不需要联网。TinyStories 和中英文 Wikipedia 通过 Hugging Face Dataset Viewer 的 `/rows` 接口获取，仅访问固定公开数据源，不发送平台个人凭据，不执行远端数据脚本。
+新增 `architecture`、`kv_heads`、`intermediate_size` 参数。旧任务和旧草稿缺失架构字段时仍解释为 GPT-2；新界面默认 Qwen3.5。Qwen3.5 为纯文本稠密结构，线性注意力与全注意力按 3:1 排列，不含视觉或 MoE；Qwen3 使用 GQA 全注意力。模型通过固定本地类从配置构建，禁止远端代码，不拉取预训练模型。
 
-服务器需要能够通过 HTTPS 访问 `datasets-server.huggingface.co`。网络受限时可以使用合成示例，或在可联网机器准备仅含 `text` 的 JSONL 再上传。失败会显示网络或大小原因，不能把失败当成已导入。链接跳转会被拒绝；单次导入最多扫描 12 页，每页最多 50 行，单页响应上限 8 MiB，结果上限 20 MiB，整次读取预算 60 秒（套接字等待最多再延迟约 10 秒），浏览器等待 90 秒。服务器同一时间只执行一个目录导入。
+Qwen3.5 当前使用 PyTorch 参考线性注意力内核，未安装 flash-linear-attention / causal-conv1d 优化扩展；CPU 正确性通过不代表 CUDA 吞吐。先小模型单卡验证，再做八卡验收。所有模型都从随机初始化开始，少量步骤产生的文本不代表成熟模型能力。
 
-系统只接收完整 text 文档，过滤空文本、截断字段、超过 1 MiB 的行和完全重复文本；不把同一文章切开当独立样本。平台后续按完整文档进行训练/验证划分，因此不是原数据集官方测试成绩。读取少于 20 篇会失败。没有承诺内容审核、近重复检测或测试集污染检测。
+训练停止并写出完整产物后，在任务详情的「模型测试」中选择 final 或完整 checkpoint。支持文本续写，以及原验证集或同项目外部 JSONL 的 Loss/PPL。固定模型类、离线分词器和 safetensors 权重重新载入；不使用 pickle 模型权重或用户代码。提示词加输出长度不得超过训练上下文。
 
-来源记录保存在 SQLite 的 `dataset_sources` 表，自动建表且不修改旧记录；停机备份会覆盖此表和语料文件。`GET /api/datasets/{id}/source` 返回来源记录，遵循原数据集项目权限。相同项目、来源和规模的重复请求复用先前保存的数据，不自动更新远端快照。导入只能由 admin/operator 操作；viewer 可以预览与查看来源。
+训练和测试共享单进程执行槽与持久队列。测试可取消、超时终止；每次最多 600 秒、256 个生成 token 或 128 个定长评估块。CPU 限权重 400 MiB，GPU 单卡测试需自行满足显存要求。外部评估按原 tokenizer、EOS 与序列长度打包，取前 N 个完整块。相同训练数据摘要不能被标成外部测试集；不提供近重复/污染检测。比较 Loss/PPL 必须保持 tokenizer、数据、评估范围一致，原验证集不是独立测试集。
 
-已保存文档摘要对应本地 JSONL，可追溯本次输入。远端 Viewer 返回的当前数据不是按提交 SHA 固定的下载，因此跨时间重新导入不保证相同；可复现实验应备份既有数据和数据库。本文网络接口参考：https://huggingface.co/docs/dataset-viewer/rows 。
+升级自动新增 `model_tests` 表，不修改旧任务。结果及日志保存在 `/state/tests`，新版停机备份覆盖该目录，兼容没有 tests 目录的旧快照。维护窗口先完成或取消排队任务；重启会将运行中测试标记 interrupted，排队测试继续执行。回滚请恢复升级前快照和配套镜像。
+
+## 常用数据集导入（ModelScope）
+
+在「准备语料 → 选择数据集」中选择中文预训练样本（默认）、MiniMind 或离线合成流程示例，数量为 50 / 200 / 500 篇，以实际导入数为准。旧版 Hugging Face 在线目录已移除，已有本地语料不受影响。
+
+固定仓库与文件：
+
+- `BazingaLyn/mini_pretrain_dataset`：`pretrain_hq_v7.jsonl`，数据卡 Apache License 2.0。
+- `gongjy/minimind_dataset`：`pretrain_t2t_mini.jsonl`，数据卡 CC-BY-NC-4.0，仅非商业使用。
+
+通过 `https://modelscope.cn/api/v1/datasets/{repo}/repo?Revision=master&FilePath={file}` 发起有界 Range 读取，服务器需放行 HTTPS `modelscope.cn`、`www.modelscope.cn`、`cdn-lfs-cn-1.modelscope.cn`。只允许这些精确主机的 HTTPS 跳转，其他跳转拒绝；不发送平台凭据、不接受任意 URL、不执行数据脚本。可在可联网机器准备 JSONL 后上传，或使用离线示例。
+
+单次最多读取 20 MiB 和 600 行，单行上限 1 MiB，60 秒读取预算、10 秒 socket 等待，浏览器等待 90 秒。同一服务只执行一次目录导入。过滤空文本、过长行、不完整尾行与完全重复文档，至少 20 篇才成功；不会切开文章凑样本。
+
+来源记录在 `dataset_sources` 表，包含源仓库/文件、master revision、ETag、下载前缀和每篇内容摘要；`GET /api/datasets/{id}/source` 按原项目权限读取。相同项目、来源和规模重复导入复用现有数据。master 可变，跨时间重新导入不保证相同，请备份本地语料与数据库。
+
+## GHCR 预构建镜像
+
+使用 `compose.image.yaml` 可以直接拉取 `ghcr.io/chensl139-ok/trainlab-pretraining:latest`，无需在服务器构建。全部 Compose 操作均加上 `-f compose.image.yaml`。首次部署与更新步骤见 README「从 GitHub 镜像部署」。服务仍需 NVIDIA Container Toolkit、符合 CUDA 13.0 要求的宿主驱动、GPU 与磁盘验收。
+
+发布 workflow 仅在 main 运行，构建 Linux amd64，先执行测试与镜像内离线 CPU smoke，再验证只读文件系统下的生产模式 API、匿名鉴权拒绝，最后推送完整提交 SHA 和 latest 标签。源标签可追溯，digest 用于内容固定；latest 会随成功发布改变。下载本身不需要源码仓库写权限。
+
+`compose.image.yaml` 不带 build 字段，保留 GPU 挂载、单用户凭据、只读文件系统、资源限制、健康检查和持久卷。不要切换项目目录或 Compose 项目名后误以为原数据消失；已有数据卷属于原项目名。升级前先完成当前任务或确认可恢复检查点，并按生产手册备份。

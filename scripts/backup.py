@@ -46,7 +46,8 @@ def backup(state,destination):
         with closing(sqlite3.connect(state/'trainlab.sqlite3')) as src,closing(sqlite3.connect(destination/'trainlab.sqlite3')) as dst:
             src.backup(dst)
             dst.execute('PRAGMA journal_mode=DELETE')
-        for name in ('datasets','jobs'):
+        for name in ('datasets','jobs','tests'):
+            if not (state/name).exists():continue
             for path in (state/name).rglob('*'):
                 if path.is_symlink():raise ValueError('Symlinks are not allowed in state backups')
             shutil.copytree(state/name,destination/name)
@@ -62,7 +63,8 @@ def restore(snapshot,state):
     state.mkdir(mode=0o700,parents=True,exist_ok=True)
     with exclusive(state):
         if any(p.name!='scheduler.lock' for p in state.iterdir()):raise ValueError('Restore requires an empty state directory')
-        for name in ('datasets','jobs'):shutil.copytree(snapshot/name,state/name)
+        for name in ('datasets','jobs','tests'):
+            if (snapshot/name).exists():shutil.copytree(snapshot/name,state/name)
         shutil.copy2(snapshot/'trainlab.sqlite3',state/'trainlab.sqlite3')
 
 if __name__=='__main__':

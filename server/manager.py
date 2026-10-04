@@ -15,6 +15,7 @@ import uuid
 import psutil
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from server.model_tests import ModelTestQueue
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,7 +33,7 @@ def gpu_inventory():
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         return {'available': False, 'gpus': [], 'error': '无法读取 NVIDIA GPU，请检查驱动及容器 GPU 挂载。'}
 
-class Manager:
+class Manager(ModelTestQueue):
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -43,6 +44,7 @@ class Manager:
         self.stop_event = threading.Event()
         self.proc = None
         self.active_id = None
+        self.active_kind = None
         self.cancelled = set()
         self.thread = None
         self.lockfile = None
@@ -54,6 +56,7 @@ class Manager:
             if 'request_key' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN request_key TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS jobs_request_key ON jobs(request_key)')
+        self.init_tests()
 
     @contextmanager
     def db(self):
@@ -76,6 +79,8 @@ class Manager:
             raise RuntimeError('Only one API process may use this state directory; use --workers 1.')
         with self.db() as db:
             db.execute("UPDATE jobs SET status='interrupted', ended_at=?, error='服务重启；可从已有检查点恢复' WHERE status IN ('running','cancelling')", (now(),))
+        with self.db() as db:
+            db.execute("UPDATE model_tests SET status='interrupted',ended_at=?,error='服务重启；请重新提交测试' WHERE status IN ('running','cancelling')",(now(),))
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
@@ -166,6 +171,7 @@ class Manager:
                     return decoded
             with self.db() as db:
                 pending=db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','cancelling')").fetchone()[0]
+                pending+=db.execute("SELECT COUNT(*) FROM model_tests WHERE status IN ('queued','running','cancelling')").fetchone()[0]
                 ds=db.execute('SELECT * FROM datasets WHERE id=?',(config['dataset_id'],)).fetchone()
             if not ds:
                 raise ValueError('数据集不存在')
@@ -215,70 +221,86 @@ class Manager:
         gpu_map = {g['index']:g['uuid'] for g in cards}
         if any(i not in gpu_map for i in ids):
             raise ValueError('请求的 GPU 不可用，请检查 GPU 挂载和编号')
+        env=self.child_environment()
+        env['CUDA_VISIBLE_DEVICES'] = ','.join(gpu_map[i] for i in ids)
+        cmd = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nnodes=1', f'--nproc_per_node={len(ids)}', '-m', 'server.train', '--config', str(self.jobdir(job['id'])/'config.json')]
+        return cmd, env
+
+    def child_environment(self):
         # Explicit allowlist: training does not inherit cloud credentials, API keys or proxy secrets.
         safe={'PATH','HOME','LANG','LC_ALL','LD_LIBRARY_PATH','CUDA_HOME','CUDA_PATH','NVIDIA_VISIBLE_DEVICES','NVIDIA_DRIVER_CAPABILITIES'}
         env = {k:v for k,v in os.environ.items() if k in safe}
         env['HF_HOME']=str(self.root/'cache')
         env['HF_HUB_OFFLINE']='1'
         env['TRANSFORMERS_OFFLINE']='1'
-        env['CUDA_VISIBLE_DEVICES'] = ','.join(gpu_map[i] for i in ids)
         env['PYTHONUNBUFFERED'] = '1'
         env['TOKENIZERS_PARALLELISM'] = 'false'
         env['OMP_NUM_THREADS'] = '4'
         # Do not pass control-plane auth into the training child.
         env.pop('TRAINLAB_API_TOKEN', None)
-        cmd = [sys.executable, '-m', 'torch.distributed.run', '--standalone', '--nnodes=1', f'--nproc_per_node={len(ids)}', '-m', 'server.train', '--config', str(self.jobdir(job['id'])/'config.json')]
-        return cmd, env
+        return env
+
+    def test_command(self,test,cards):
+        parent=self.get(test['job_id'])
+        self.test_model_path(parent,test['config']['checkpoint'])
+        env=self.child_environment();env['CUDA_VISIBLE_DEVICES']=''
+        if test['config']['device']=='cuda':
+            gpu=next((g for g in cards if g['index']==test['config']['gpu_id']),None)
+            if gpu is None:raise ValueError('测试 GPU 已不可用')
+            env['CUDA_VISIBLE_DEVICES']=gpu['uuid']
+        return [sys.executable,'-m','server.evaluate','--config',str(self.testdir(test['id'])/'config.json')],env
 
     def loop(self):
         while not self.stop_event.wait(.5):
             with self.lock:
                 with self.db() as db:
-                    row = db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
-                if not row:
-                    continue
-                job = self.decode(row)
-                jid = job['id']
+                    train=db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+                    test=db.execute("SELECT * FROM model_tests WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+                if not train and not test:continue
+                is_test=bool(test and (not train or test['created_at']<train['created_at']))
+                table='model_tests' if is_test else 'jobs'
+                job=self.decode(test if is_test else train);jid=job['id']
+                folder=self.testdir(jid) if is_test else self.jobdir(jid)
+                log=folder/('test.log' if is_test else 'train.log')
                 try:
-                    inventory = gpu_inventory()
-                    cmd, env = self.command(job, inventory['gpus'])
-                    with open(self.jobdir(jid)/'train.log','ab') as output:
-                        self.proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-                    self.active_id = jid
-                    with self.db() as db:
-                        db.execute("UPDATE jobs SET status='running',started_at=? WHERE id=?", (now(),jid))
+                    cards=gpu_inventory()['gpus']
+                    cmd,env=self.test_command(job,cards) if is_test else self.command(job,cards)
+                    with log.open('ab') as output:
+                        self.proc=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+                    self.active_id=jid;self.active_kind=table
+                    with self.db() as db:db.execute(f"UPDATE {table} SET status='running',started_at=? WHERE id=?",(now(),jid))
                 except Exception as e:
-                    if self.proc and self.proc.poll() is None:
-                        self.terminate(self.proc)
-                    with self.db() as db:
-                        db.execute("UPDATE jobs SET status='failed',ended_at=?,error=? WHERE id=?", (now(),str(e),jid))
-                    self.proc = None
-                    self.active_id = None
+                    if self.proc and self.proc.poll() is None:self.terminate(self.proc)
+                    with self.db() as db:db.execute(f"UPDATE {table} SET status='failed',ended_at=?,error=? WHERE id=?",(now(),str(e),jid))
+                    self.proc=None;self.active_id=None;self.active_kind=None
                     continue
-            started=time.monotonic()
-            reason=None
+            started=time.monotonic();reason=None
             while self.proc.poll() is None:
                 if self.stop_event.wait(.5):
                     with self.lock:
-                        if self.proc.poll() is None:
-                            self.terminate(self.proc)
+                        if self.proc.poll() is None:self.terminate(self.proc)
                     break
-                if time.monotonic()-started>job['config'].get('max_runtime_seconds',21600):
-                    reason='超过任务运行时限'
-                elif shutil.disk_usage(self.root).free<self.min_free_bytes:
-                    reason='可用磁盘低于安全水位'
+                if time.monotonic()-started>job['config'].get('max_runtime_seconds',21600):reason='超过任务运行时限'
+                elif shutil.disk_usage(self.root).free<self.min_free_bytes:reason='可用磁盘低于安全水位'
                 if reason:
-                    with self.lock:
-                        self.terminate(self.proc)
+                    with self.lock:self.terminate(self.proc)
                     break
-            exit_code = self.proc.wait()
+            exit_code=self.proc.wait()
             with self.lock:
-                status = 'interrupted' if self.stop_event.is_set() else 'cancelled' if jid in self.cancelled else 'succeeded' if exit_code == 0 else 'failed'
-                error = reason or (None if status == 'succeeded' else f'训练进程退出码 {exit_code}；详情见日志')
-                if reason:
-                    status='failed'
+                status='interrupted' if self.stop_event.is_set() else 'cancelled' if jid in self.cancelled else 'succeeded' if exit_code==0 else 'failed'
+                error=reason or (None if status=='succeeded' else f'进程退出码 {exit_code}；详情见日志')
+                if reason:status='failed'
+                result=None
+                if is_test and status=='succeeded':
+                    try:
+                        file=folder/'result.json'
+                        if file.stat().st_size>256*1024:raise ValueError('结果超过大小上限')
+                        result=json.dumps(json.loads(file.read_text()),ensure_ascii=False,allow_nan=False)
+                    except (OSError,ValueError) as e:status='failed';error='读取测试结果失败：'+str(e)
+                if is_test and status=='failed' and log.exists():
+                    with log.open('rb') as f:
+                        f.seek(max(0,log.stat().st_size-4000));error=(error or '测试失败')+'\n'+f.read().decode('utf-8',errors='replace')
                 with self.db() as db:
-                    db.execute('UPDATE jobs SET status=?,ended_at=?,error=? WHERE id=?', (status,now(),error,jid))
-                self.cancelled.discard(jid)
-                self.proc = None
-                self.active_id = None
+                    db.execute(f'UPDATE {table} SET status=?,ended_at=?,error=? WHERE id=?',(status,now(),error,jid))
+                    if is_test:db.execute('UPDATE model_tests SET result=? WHERE id=?',(result,jid))
+                self.cancelled.discard(jid);self.proc=None;self.active_id=None;self.active_kind=None

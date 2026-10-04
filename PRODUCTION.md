@@ -6,9 +6,9 @@
 
 浏览器 → HTTPS/Caddy 或 SSH 隧道 → 单 worker FastAPI → SQLite WAL 持久队列 → torchrun → DDP Trainer → 本地 volume 中的检查点/权重。
 
-同一 volume 只允许一个调度器，串行执行训练；没有多机、高可用或自动故障转移。项目权限在 API 层校验，包含数据列表、提交、日志、取消、恢复与下载。训练使用固定代码、结构化参数，禁止客户端指定 shell、模型下载路径或 Python 代码。子进程环境只继承必要变量，不继承服务访问凭据/云密钥。容器非 root、只读根文件系统、去除 capabilities，训练输出写入 `/state`。
+同一 volume 只允许一个调度器，串行执行训练及模型测试；没有多机、高可用或自动故障转移。项目权限在 API 层校验，包含数据列表、提交、日志、取消、恢复与下载。训练使用固定代码、结构化参数，禁止客户端指定 shell、模型下载路径或 Python 代码。子进程环境只继承必要变量，不继承服务访问凭据/云密钥。容器非 root、只读根文件系统、去除 capabilities，训练输出写入 `/state`。
 
-管理员、宿主机 root、容器进程和共享数据卷仍属于同一信任域。API 项目权限不构成文件系统租户隔离；不接受外部不受信任代码或训练镜像。个人 API key 不是 SSO/MFA。当前 100 MiB JSONL 上限、小模型 GPT-2 路线适合流程验证，不能代表大规模基础模型生产流水线。
+管理员、宿主机 root、容器进程和共享数据卷仍属于同一信任域。API 项目权限不构成文件系统租户隔离；不接受外部不受信任代码或训练镜像。个人 API key 不是 SSO/MFA。当前 100 MiB JSONL 上限、可缩放 Qwen3.5/Qwen3/GPT-2 的小模型路线适合流程验证，不能代表大规模基础模型生产流水线。
 
 ## 发布门禁与证据
 
@@ -21,7 +21,7 @@
 | GPU 兼容性 | 保存型号/显存/驱动/拓扑；逐卡 BF16 前后向；8 卡 NCCL | 待目标机器执行 |
 | 性能与稳定性 | 固定配置 1/2/4/8 卡 tokens/s、峰值显存；建议至少 24h 训练稳定性观察 | 未执行；24h 是拟定门槛，不是字节标准 |
 | 故障演练 | OOM、磁盘水位、容器重启、worker 异常、检查点中断、停电后恢复 | 部分本地模拟；目标机器演练待执行 |
-| 模型质量 | 独立测试集、污染排查、loss/PPL 基线、业务任务评测 | 未完成；不能以训练 loss 代替质量 |
+| 模型质量 | 独立测试集、污染排查、loss/PPL 基线、业务任务评测 | 已实现续写与有界 Loss/PPL；独立业务质量验收未完成 |
 | 安全与供应链 | 依赖/CUDA 镜像扫描、SBOM、批准镜像 digest、密钥轮换、网关接入 | 本地 API 与 Python 训练环境扫描为 0 已知漏洞；目标镜像扫描待完成 |
 | 运维 | 告警收到并响应、异机备份、恢复演练、值班责任人与回滚记录 | 工具已提供；运行制度与演练未完成 |
 | 企业集成 | 企业 SSO、集中不可篡改审计、项目配额、审批/变更制度 | 未实现 |
@@ -40,7 +40,7 @@
 
 ## 停机备份
 
-先安排维护窗口并停止训练。snapshot 包含数据库、全部 datasets、jobs；不包含 HF cache、凭据原文、TLS 私钥、`.env` 或镜像。数据库包含凭据摘要，训练文件包含业务数据：备份也应限制访问并加密存储。
+先安排维护窗口并停止训练。snapshot 包含数据库、全部 datasets、jobs、tests；不包含 HF cache、凭据原文、TLS 私钥、`.env` 或镜像。数据库包含凭据摘要，训练文件包含业务数据：备份也应限制访问并加密存储。
 
 以下路径以 Linux 服务器为例，UID 10001 对备份目录必须有写权限：
 
@@ -72,7 +72,7 @@ docker run --rm --user 10001:10001 -v trainlab-restore-v3:/state -v /srv/trainla
 
 记录日期/执行人、源码 commit、镜像 digest、OS/驱动/CUDA/PyTorch、每卡 UUID/显存、拓扑、CPU/RAM/磁盘、数据 sha256、tokenizer、seed、模型参数、序列长度、precision、micro batch/accumulation/world size、实际 tokens/s、峰值显存、开始/结束时间、退出码、验证 loss、检查点恢复步数、故障与处置。
 
-扩卡比较需要保持有效 batch 与 token 数、数据划分等实验条件一致：有效 batch = micro batch × gradient accumulation × GPU 数。DDP 每卡保存完整模型，8 卡总显存不是单模型可用的连续显存。先验证 12M 默认配置，再扩大模型；没有实测前不承诺 7B/更大规模的可训练性或工期。
+扩卡比较需要保持有效 batch 与 token 数、数据划分等实验条件一致：有效 batch = micro batch × gradient accumulation × GPU 数。DDP 每卡保存完整模型，8 卡总显存不是单模型可用的连续显存。先验证小规模配置，再扩大模型；没有实测前不承诺 7B/更大规模的可训练性或工期。
 
 参考框架：[OWASP ASVS](https://owasp.org/projects/asvs) 用于建立应用安全检查项；[PyTorch torchrun](https://docs.pytorch.org/docs/stable/elastic/run.html) 用于核对分布式启动语义；[NVIDIA DCGM](https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/feature-overview.html) 用于规划 GPU 监控。引用这些资料不等于通过认证，也不等于获得字节内部规范。
 
@@ -82,4 +82,4 @@ docker run --rm --user 10001:10001 -v trainlab-restore-v3:/state -v /srv/trainla
 
 `reports/api-dependency-audit.json`：15 个已解析包，0 条已知漏洞报告；`reports/local-training-dependency-audit.json`：本地环境 51 个包，0 条。扫描日期 2026-10-03，使用 pip-audit 默认漏洞数据源。它们不包含目标 Linux 镜像内的系统/CUDA 库，也不是永久安全保证。`reports/local-python-environment.txt` 记录验证环境，不作为跨平台 lock 文件。发布前在最终镜像重新生成 SBOM、扫描并固定产物 digest。
 
-可用 `make check` 执行 API/权限/恢复测试、前端语法与依赖一致性检查，`make smoke` 执行离线 CPU 训练和恢复权重比较。`make audit AUDITOR=<pip-audit可执行路径>` 扫描 API 依赖及 `PYTHON` 指定的已安装环境（包含 torch）；发现问题会返回非零退出码，不自动忽略公告。尚未接入远程 CI 平台。
+可用 `make check` 执行 API/权限/恢复测试、前端语法与依赖一致性检查，`make smoke` 执行离线 CPU 训练和恢复权重比较。`make audit AUDITOR=<pip-audit可执行路径>` 扫描 API 依赖及 `PYTHON` 指定的已安装环境（包含 torch）；发现问题会返回非零退出码，不自动忽略公告。已接入 GitHub Actions：测试、Linux amd64 镜像构建、三种架构的镜像内 CPU 训练/恢复/续写/评分与生产 API 启动检查，通过后发布 GHCR；CI 无 NVIDIA GPU。

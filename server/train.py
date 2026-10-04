@@ -75,7 +75,7 @@ def run(config, cpu_smoke=False):
     import numpy as np
     import torch
     from torch.utils.data import Dataset
-    from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast, Trainer, TrainingArguments, TrainerCallback, default_data_collator, set_seed
+    from transformers import PreTrainedTokenizerFast, Trainer, TrainingArguments, TrainerCallback, default_data_collator, set_seed
     rank=int(os.environ.get('RANK','0'))
     local_rank=int(os.environ.get('LOCAL_RANK','0'))
     world=int(os.environ.get('WORLD_SIZE','1'))
@@ -98,12 +98,10 @@ def run(config, cpu_smoke=False):
         torch.distributed.barrier()
     tokenizer=PreTrainedTokenizerFast.from_pretrained(output/'tokenizer',local_files_only=True)
     set_seed(config['seed'])
-    model_config=GPT2Config(vocab_size=len(tokenizer),n_positions=config['seq_length'],n_ctx=config['seq_length'],
-        n_embd=config['hidden_size'],n_layer=config['layers'],n_head=config['heads'],
-        bos_token_id=tokenizer.eos_token_id,eos_token_id=tokenizer.eos_token_id,pad_token_id=tokenizer.pad_token_id,
-        resid_pdrop=.0,embd_pdrop=.0,attn_pdrop=.0,use_cache=False)
-    # A new architecture object creates RANDOM weights. No pretrained download.
-    model=GPT2LMHeadModel(model_config)
+    from server.architectures import model_config,model_class
+    architecture=config.get('architecture','gpt2')
+    # Explicit architecture class + new config creates RANDOM weights; no download.
+    model=model_class(architecture)(model_config(config,len(tokenizer),tokenizer.pad_token_id,tokenizer.eos_token_id))
 
     class PackedDataset(Dataset):
         def __init__(self,path,length):
@@ -148,7 +146,7 @@ def run(config, cpu_smoke=False):
         processing_class=tokenizer,data_collator=default_data_collator,callbacks=[Metrics()])
     if rank==0:
         print(json.dumps({'event':'model_initialized','parameters':model.num_parameters(),
-            'world_size':world,'effective_batch':config['micro_batch']*config['grad_accum']*world,
+            'architecture':architecture,'world_size':world,'effective_batch':config['micro_batch']*config['grad_accum']*world,
             'torch_version':torch.__version__,'cuda':torch.version.cuda,'cpu_smoke':cpu_smoke}),flush=True)
     result=trainer.train(resume_from_checkpoint=config.get('resume_from'))
     evaluation=trainer.evaluate()
@@ -157,7 +155,7 @@ def run(config, cpu_smoke=False):
         tokenizer.save_pretrained(output/'final')
         loss=evaluation.get('eval_loss')
         summary={'mode':'CPU smoke test' if cpu_smoke else 'GPU pretraining',
-                 'parameters':model.num_parameters(),'world_size':world,
+                 'parameters':model.num_parameters(),'architecture':architecture,'world_size':world,
                  'training':result.metrics,'validation':evaluation,
                  'perplexity':math.exp(loss) if loss is not None and math.isfinite(loss) and loss<50 else None,
                  'note':'同一分词器和验证集内比较；本任务没有独立测试集。',
