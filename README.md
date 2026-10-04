@@ -43,10 +43,10 @@
 
 ## 在服务器部署
 
-这是私有仓库。服务器需要先获得该仓库的访问权限；使用 GitHub CLI 时可先运行 `gh auth login`，再用下面的命令克隆。不要在 URL 中写入访问令牌。
+这是公开仓库，服务器可直接通过 HTTPS 克隆，无需 GitHub 登录。训练服务仍需要个人凭据；公开源码不会开放服务器上的语料、模型或任务。
 
 ```bash
-gh repo clone chensl139-ok/trainlab-pretraining
+git clone https://github.com/chensl139-ok/trainlab-pretraining.git
 cd trainlab-pretraining
 ```
 
