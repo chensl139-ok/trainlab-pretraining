@@ -81,3 +81,8 @@ class ModelTestConfig(BaseModel):
         if self.mode=='generate' and self.dataset_id:
             raise ValueError('续写测试不需要评估语料')
         return self
+
+class SchedulerControl(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    paused: bool
+    reason: str=Field(default='',max_length=200)

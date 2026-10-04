@@ -8,6 +8,12 @@ from pathlib import Path
 import time
 
 
+def require_finite_metrics(logs):
+    for key,value in logs.items():
+        if isinstance(value,(int,float)) and not math.isfinite(value):
+            raise FloatingPointError(f'训练指标 {key} 出现非有限值，停止运行；请检查精度、学习率及数据后恢复完整检查点')
+
+
 def documents(path, seed):
     seen = set()
     with open(path, encoding='utf-8') as f:
@@ -116,7 +122,8 @@ def run(config, cpu_smoke=False):
     class Metrics(TrainerCallback):
         def on_log(self,args,state,control,logs=None,**kwargs):
             if state.is_world_process_zero and logs:
-                safe={k:v for k,v in logs.items() if not isinstance(v,float) or math.isfinite(v)}
+                require_finite_metrics(logs)
+                safe=logs
                 event={'step':state.global_step,'time':time.time(),**safe}
                 with open(config['metrics_path'],'a') as f:
                     f.write(json.dumps(event,allow_nan=False)+'\n')
@@ -132,7 +139,7 @@ def run(config, cpu_smoke=False):
         gradient_accumulation_steps=config['grad_accum'],learning_rate=config['learning_rate'],
         warmup_steps=math.ceil(config['warmup_ratio']*config['max_steps']),weight_decay=config['weight_decay'],
         lr_scheduler_type='cosine',optim='adamw_torch',max_grad_norm=1.0,
-        eval_strategy='steps',eval_steps=config['eval_steps'],logging_steps=1,
+        eval_strategy='steps',eval_steps=config['eval_steps'],logging_steps=1,logging_nan_inf_filter=False,
         save_strategy='steps',save_steps=config['save_steps'],save_total_limit=2,
         bf16=config['precision']=='bf16' and not cpu_smoke,
         use_cpu=cpu_smoke,tf32=False,seed=config['seed'],data_seed=config['seed'],

@@ -1,7 +1,7 @@
 /* Shared, pure UI calculations; independently testable without a GPU or a DOM. */
 (function(root){
   'use strict';
-  const defaults={name:'首次文本预训练',dataset_id:'',gpu_ids:[],architecture:'qwen3_5',kv_heads:2,intermediate_size:0,layers:6,hidden_size:384,heads:6,seq_length:256,vocab_size:4096,micro_batch:2,grad_accum:8,max_steps:100,learning_rate:.0003,warmup_ratio:.03,weight_decay:.1,eval_steps:25,save_steps:25,seed:42,precision:'bf16',gradient_checkpointing:true,max_runtime_seconds:21600};
+  const defaults={name:'首次文本预训练',dataset_id:'',gpu_ids:[],architecture:'qwen3',kv_heads:2,intermediate_size:0,layers:6,hidden_size:384,heads:6,seq_length:256,vocab_size:4096,micro_batch:2,grad_accum:8,max_steps:100,learning_rate:.0003,warmup_ratio:.03,weight_decay:.1,eval_steps:25,save_steps:25,seed:42,precision:'bf16',gradient_checkpointing:true,max_runtime_seconds:21600};
   const bounds={kv_heads:[1,32],intermediate_size:[0,16384],layers:[2,32],hidden_size:[128,2048],heads:[2,32],seq_length:[64,2048],vocab_size:[512,65536],micro_batch:[1,16],grad_accum:[1,256],max_steps:[10,1000000],learning_rate:[.000001,.01],warmup_ratio:[0,.5],weight_decay:[0,1],eval_steps:[1,10000],save_steps:[1,10000],seed:[0,2147483647],max_runtime_seconds:[60,604800]};
   const fractions=new Set(['learning_rate','warmup_ratio','weight_decay']);
   function validate(c){

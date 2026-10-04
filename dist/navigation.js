@@ -24,6 +24,7 @@
   const gpu=location.pathname.endsWith('/gpu.html');
   if(!gpu){sidebar.querySelectorAll('a[href^="/#"]').forEach(a=>a.setAttribute('href',a.hash));}
   select(gpu?'gpu':parse(location.hash).view);
+  if(!gpu)sidebar.querySelector('.learning-nav').open=true;
   toggle.onclick=()=>drawer(!opened);close.onclick=()=>drawer(false);backdrop.onclick=()=>drawer(false);
   sidebar.addEventListener('click',event=>{
     const a=event.target.closest('a');if(!a||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;
@@ -35,7 +36,7 @@
     if(!opened)return;
     if(event.key==='Escape'){event.preventDefault();drawer(false);}
     if(event.key==='Tab'){
-      const items=[...sidebar.querySelectorAll('a,button')].filter(el=>el.getClientRects().length),first=items[0],last=items.at(-1);
+      const items=[...sidebar.querySelectorAll('a,button,summary')].filter(el=>el.getClientRects().length),first=items[0],last=items.at(-1);
       if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
       else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
     }

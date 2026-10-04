@@ -1,6 +1,7 @@
 """Persistent test queue, shared with the training scheduler and project ACLs."""
 import hashlib
 import json
+import math
 import re
 import shutil
 import uuid
@@ -8,6 +9,24 @@ from datetime import datetime, timezone
 
 ACTIVE=('queued','running','cancelling')
 def timestamp():return datetime.now(timezone.utc).isoformat()
+
+def validate_result(result,config):
+    if not isinstance(result,dict) or result.get('mode')!=config['mode'] or result.get('checkpoint')!=config['checkpoint']:
+        raise ValueError('测试结果与请求不匹配')
+    fields=('prompt_tokens','generated_tokens','generation_seconds') if config['mode']=='generate' else ('loss','evaluated_tokens','blocks','sequence_length')
+    for name in fields:
+        value=result.get(name)
+        if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
+            raise ValueError('测试结果字段无效：'+name)
+    if config['mode']=='generate':
+        if not all(isinstance(result.get(key),str) for key in ('prompt','completion')):raise ValueError('缺少续写文本')
+        rate=result.get('tokens_per_second')
+        if rate is not None and (isinstance(rate,bool) or not isinstance(rate,(int,float)) or not math.isfinite(rate) or rate<0):raise ValueError('生成速率无效')
+    else:
+        if not all(result.get(key,0)>0 for key in ('evaluated_tokens','blocks','sequence_length')):raise ValueError('评估 token 数无效')
+        ppl=result.get('perplexity')
+        if ppl is not None and (isinstance(ppl,bool) or not isinstance(ppl,(int,float)) or not math.isfinite(ppl) or ppl<1):raise ValueError('困惑度无效')
+    return result
 
 class ModelTestQueue:
     def init_tests(self):
@@ -51,6 +70,7 @@ class ModelTestQueue:
                     old=self.decode_test(prior)
                     if old['config']!=config or old['job_id']!=jid:raise ValueError('相同提交标识不能用于不同测试')
                     return old
+            self.require_accepting()
             job=self.get(jid)
             if not job:raise ValueError('训练任务不存在')
             path=self.test_model_path(job,config['checkpoint'])

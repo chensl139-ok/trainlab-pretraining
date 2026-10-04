@@ -12,10 +12,12 @@ import shutil
 import threading
 import time
 import uuid
+import traceback
 import psutil
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from server.model_tests import ModelTestQueue
+from server.model_tests import ModelTestQueue,validate_result
+from server.architectures import parameter_estimate
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,8 +50,16 @@ class Manager(ModelTestQueue):
         self.cancelled = set()
         self.thread = None
         self.lockfile = None
+        self.execution_lease = None
+        self.blocked_reason = None
+        self.scheduler_error = None
+        self.started_at = now()
+        self.max_log_bytes = int(os.environ.get('TRAINLAB_MAX_LOG_BYTES',str(256*1024**2)))
+        self.gpu_idle_mib = int(os.environ.get('TRAINLAB_GPU_IDLE_MIB','1024'))
         self.max_pending = int(os.environ.get('TRAINLAB_MAX_PENDING_JOBS','20'))
         self.min_free_bytes = int(os.environ.get('TRAINLAB_MIN_FREE_BYTES',str(5*1024**3)))
+        if self.max_pending<1 or self.min_free_bytes<0 or self.gpu_idle_mib<0 or self.max_log_bytes<1024**2:
+            raise ValueError('Invalid runtime limits: pending >= 1, disk/GPU thresholds >= 0, log limit >= 1 MiB')
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, name TEXT, rows INTEGER, bytes INTEGER, sha256 TEXT, created_at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, config TEXT, created_at TEXT, started_at TEXT, ended_at TEXT, error TEXT, resume_from TEXT, request_key TEXT)')
@@ -57,6 +67,9 @@ class Manager(ModelTestQueue):
                 db.execute('ALTER TABLE jobs ADD COLUMN request_key TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS jobs_request_key ON jobs(request_key)')
         self.init_tests()
+        with self.db() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS scheduler_control (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL, reason TEXT NOT NULL, updated_at TEXT NOT NULL, actor TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO scheduler_control VALUES(1,0,?,?,?)',('',now(),'system'))
 
     @contextmanager
     def db(self):
@@ -69,6 +82,41 @@ class Manager(ModelTestQueue):
                 yield db
         finally:
             db.close()
+
+    def control(self):
+        with self.db() as db:
+            value=dict(db.execute('SELECT paused,reason,updated_at,actor FROM scheduler_control WHERE id=1').fetchone())
+        value['paused']=bool(value['paused'])
+        return value
+
+    def set_control(self,paused,reason,actor):
+        with self.lock:
+            with self.db() as db:
+                db.execute('UPDATE scheduler_control SET paused=?,reason=?,updated_at=?,actor=? WHERE id=1',(int(paused),reason,now(),actor))
+        return self.control()
+
+    def require_accepting(self):
+        if self.control()['paused']:raise ValueError('维护模式：已停止接收新训练和测试任务')
+
+    def lease_available(self):
+        with (self.root/'execution.lock').open('a') as lease:
+            try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:return False
+            fcntl.flock(lease,fcntl.LOCK_UN)
+        return True
+
+    def launch_guard(self,job,is_test,cards):
+        c=job['config']
+        with self.db() as db:
+            ds=db.execute('SELECT bytes FROM datasets WHERE id=?',(c.get('dataset_id'),)).fetchone()
+        reserve=self.max_log_bytes if is_test else parameter_estimate(c)*48+(ds['bytes'] if ds else 0)*8+self.max_log_bytes
+        required=self.min_free_bytes+reserve
+        if shutil.disk_usage(self.root).free<required:
+            return f'磁盘不足：启动预留约 {required/1024**3:.1f} GiB（含安全水位）；队列保留，释放空间后重试'
+        c=job['config'];ids=[c['gpu_id']] if is_test and c['device']=='cuda' else [] if is_test else c['gpu_ids']
+        busy=[g['index'] for g in cards if g['index'] in ids and g.get('memory_used_mib',0)>self.gpu_idle_mib]
+        if busy:return 'GPU '+','.join(map(str,busy))+' 已有显存占用；等待其他进程释放，不抢占运行'
+        return None
 
     def start(self):
         self.lockfile = open(self.root/'scheduler.lock', 'a')
@@ -169,6 +217,7 @@ class Manager(ModelTestQueue):
                     if decoded['config'] != config:
                         raise ValueError('相同提交标识不能用于不同配置')
                     return decoded
+            self.require_accepting()
             with self.db() as db:
                 pending=db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','cancelling')").fetchone()[0]
                 pending+=db.execute("SELECT COUNT(*) FROM model_tests WHERE status IN ('queued','running','cancelling')").fetchone()[0]
@@ -251,8 +300,19 @@ class Manager(ModelTestQueue):
         return [sys.executable,'-m','server.evaluate','--config',str(self.testdir(test['id'])/'config.json')],env
 
     def loop(self):
+        try:self._loop()
+        except Exception as exc:
+            self.scheduler_error=type(exc).__name__+': '+str(exc)
+            traceback.print_exc()
+            if self.proc and self.proc.poll() is None:self.terminate(self.proc)
+        finally:
+            if self.execution_lease:self.execution_lease.close();self.execution_lease=None
+
+    def _loop(self):
         while not self.stop_event.wait(.5):
             with self.lock:
+                self.blocked_reason=None
+                if self.control()['paused']:continue
                 with self.db() as db:
                     train=db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
                     test=db.execute("SELECT * FROM model_tests WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
@@ -264,15 +324,28 @@ class Manager(ModelTestQueue):
                 log=folder/('test.log' if is_test else 'train.log')
                 try:
                     cards=gpu_inventory()['gpus']
+                    self.blocked_reason=self.launch_guard(job,is_test,cards)
+                    if self.blocked_reason:
+                        self.stop_event.wait(2)
+                        continue
+                    lease=(self.root/'execution.lock').open('a')
+                    try:fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        lease.close();self.blocked_reason='仍有工作进程持有执行锁；等待退出，禁止重复启动'
+                        self.stop_event.wait(2)
+                        continue
+                    self.execution_lease=lease
                     cmd,env=self.test_command(job,cards) if is_test else self.command(job,cards)
                     with log.open('ab') as output:
-                        self.proc=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+                        supervised=[sys.executable,'-m','server.supervisor','--parent-pid',str(os.getpid()),'--lease-fd',str(lease.fileno()),'--',*cmd]
+                        self.proc=subprocess.Popen(supervised,cwd=ROOT,env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True,pass_fds=(lease.fileno(),))
                     self.active_id=jid;self.active_kind=table
                     with self.db() as db:db.execute(f"UPDATE {table} SET status='running',started_at=? WHERE id=?",(now(),jid))
                 except Exception as e:
                     if self.proc and self.proc.poll() is None:self.terminate(self.proc)
                     with self.db() as db:db.execute(f"UPDATE {table} SET status='failed',ended_at=?,error=? WHERE id=?",(now(),str(e),jid))
                     self.proc=None;self.active_id=None;self.active_kind=None
+                    if self.execution_lease:self.execution_lease.close();self.execution_lease=None
                     continue
             started=time.monotonic();reason=None
             while self.proc.poll() is None:
@@ -282,6 +355,7 @@ class Manager(ModelTestQueue):
                     break
                 if time.monotonic()-started>job['config'].get('max_runtime_seconds',21600):reason='超过任务运行时限'
                 elif shutil.disk_usage(self.root).free<self.min_free_bytes:reason='可用磁盘低于安全水位'
+                elif log.exists() and log.stat().st_size>self.max_log_bytes:reason='任务日志超过运行上限，请检查重复报错后从完整检查点恢复'
                 if reason:
                     with self.lock:self.terminate(self.proc)
                     break
@@ -291,11 +365,20 @@ class Manager(ModelTestQueue):
                 error=reason or (None if status=='succeeded' else f'进程退出码 {exit_code}；详情见日志')
                 if reason:status='failed'
                 result=None
+                if not is_test and status=='succeeded':
+                    try:
+                        output=folder/'output';summary=json.loads((output/'summary.json').read_text())
+                        if not isinstance(summary,dict) or not isinstance(summary.get('validation'),dict) or not isinstance(summary['validation'].get('eval_loss'),(int,float)):raise ValueError('缺少验证 loss')
+                        json.dumps(summary,allow_nan=False)
+                        final=output/'final'
+                        if not all((final/name).is_file() for name in ('config.json','tokenizer.json')) or not list(final.glob('*.safetensors')):
+                            raise ValueError('缺少最终模型权重、配置或分词器')
+                    except (OSError,ValueError) as exc:status='failed';error='训练进程已退出，但产物校验失败：'+str(exc)
                 if is_test and status=='succeeded':
                     try:
                         file=folder/'result.json'
                         if file.stat().st_size>256*1024:raise ValueError('结果超过大小上限')
-                        result=json.dumps(json.loads(file.read_text()),ensure_ascii=False,allow_nan=False)
+                        result=json.dumps(validate_result(json.loads(file.read_text()),job['config']),ensure_ascii=False,allow_nan=False)
                     except (OSError,ValueError) as e:status='failed';error='读取测试结果失败：'+str(e)
                 if is_test and status=='failed' and log.exists():
                     with log.open('rb') as f:
@@ -304,3 +387,4 @@ class Manager(ModelTestQueue):
                     db.execute(f'UPDATE {table} SET status=?,ended_at=?,error=? WHERE id=?',(status,now(),error,jid))
                     if is_test:db.execute('UPDATE model_tests SET result=? WHERE id=?',(result,jid))
                 self.cancelled.discard(jid);self.proc=None;self.active_id=None;self.active_kind=None
+                if self.execution_lease:self.execution_lease.close();self.execution_lease=None

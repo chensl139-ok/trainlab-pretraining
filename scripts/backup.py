@@ -10,15 +10,16 @@ from pathlib import Path
 
 @contextmanager
 def exclusive(state):
-    with (state/'scheduler.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError('Stop TrainLab before backup or restore') from None
-        try:
-            yield
-        finally:
-            fcntl.flock(lock,fcntl.LOCK_UN)
+    locks=[]
+    try:
+        for name in ('scheduler.lock','execution.lock'):
+            lock=(state/name).open('a');locks.append(lock)
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError('Stop TrainLab and wait for workers before backup or restore') from None
+        yield
+    finally:
+        for lock in reversed(locks):
+            fcntl.flock(lock,fcntl.LOCK_UN);lock.close()
 
 def digest(path):
     h=hashlib.sha256()
@@ -62,7 +63,7 @@ def restore(snapshot,state):
         raise ValueError('Restore to the same absolute state mount path; configs contain checkpoint paths')
     state.mkdir(mode=0o700,parents=True,exist_ok=True)
     with exclusive(state):
-        if any(p.name!='scheduler.lock' for p in state.iterdir()):raise ValueError('Restore requires an empty state directory')
+        if any(p.name not in ('scheduler.lock','execution.lock') for p in state.iterdir()):raise ValueError('Restore requires an empty state directory')
         for name in ('datasets','jobs','tests'):
             if (snapshot/name).exists():shutil.copytree(snapshot/name,state/name)
         shutil.copy2(snapshot/'trainlab.sqlite3',state/'trainlab.sqlite3')

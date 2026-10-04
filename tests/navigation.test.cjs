@@ -20,3 +20,10 @@ test('both workspaces expose identical navigation destinations and accessibility
   for(const page of pages){assert.match(page,/aria-controls="site-sidebar"/);assert.match(page,/src="navigation.js"/);assert.match(page,/href="navigation.css"/);}
   assert.equal((sidebars[0].match(/target="_blank" rel="noopener"/g)||[]).length,2);
 });
+test('deployment entry opens GPU operations while preserving learning deep links',()=>{
+  const vm=require('node:vm'),source=fs.readFileSync('dist/entry.js','utf8');
+  for(const hash of ['', '#training', '#learn/2']){
+    let target=null;vm.runInNewContext(source,{location:{hash,replace:value=>target=value}});
+    assert.equal(target,hash?null:'/gpu.html');
+  }
+});

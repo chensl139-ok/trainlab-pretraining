@@ -7,6 +7,9 @@ import shutil
 import time
 import threading
 import logging
+import platform
+import importlib.metadata
+import psutil
 import anyio
 from pathlib import Path
 import uuid
@@ -15,7 +18,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from server.manager import Manager, ROOT, gpu_inventory, now
-from server.schema import TrainConfig, CatalogImport, ModelTestConfig
+from server.schema import TrainConfig, CatalogImport, ModelTestConfig, SchedulerControl
 from server.catalog import CATALOG, collect, CatalogError, MAX_OUTPUT
 from server.security import AuthStore, Principal
 from server.architectures import ARCHITECTURES
@@ -119,11 +122,12 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
 
     @app.get('/api/health')
     def health():
-        return {'service':'trainlab-pretraining','version':5,'auth_required':True}
+        return {'service':'trainlab-pretraining','version':6,'auth_required':True}
 
     @app.get('/api/ready')
     def ready():
         healthy = bool(manager.thread and manager.thread.is_alive()) and shutil.disk_usage(state).free >= manager.min_free_bytes
+        healthy = healthy and (manager.active_id is not None or manager.lease_available())
         return JSONResponse({'ready':healthy},status_code=200 if healthy else 503)
 
     @app.get('/api/me')
@@ -143,9 +147,16 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
             raise HTTPException(403,'需要管理员权限')
         with manager.db() as db:
             counts = dict(db.execute('SELECT status,COUNT(*) FROM jobs GROUP BY status').fetchall())
+            test_counts = dict(db.execute('SELECT status,COUNT(*) FROM model_tests GROUP BY status').fetchall())
         lines = ['# TYPE trainlab_jobs gauge']
         for st in ('queued','running','cancelling','succeeded','failed','interrupted','cancelled'):
             lines.append('trainlab_jobs{status="'+st+'"} '+str(counts.get(st,0)))
+        lines.append('# TYPE trainlab_model_tests gauge')
+        for st in ('queued','running','cancelling','succeeded','failed','interrupted','cancelled'):
+            lines.append('trainlab_model_tests{status="'+st+'"} '+str(test_counts.get(st,0)))
+        lines += ['# TYPE trainlab_scheduler_paused gauge','trainlab_scheduler_paused '+str(int(manager.control()['paused'])),
+            '# TYPE trainlab_scheduler_blocked gauge','trainlab_scheduler_blocked '+str(int(bool(manager.blocked_reason))),
+            '# TYPE trainlab_worker_active gauge','trainlab_worker_active '+str(int(manager.active_id is not None))]
         lines += ['# TYPE trainlab_disk_free_bytes gauge','trainlab_disk_free_bytes '+str(shutil.disk_usage(state).free),
             '# TYPE trainlab_scheduler_alive gauge','trainlab_scheduler_alive '+str(int(bool(manager.thread and manager.thread.is_alive())))]
         return '\n'.join(lines)+'\n'
@@ -156,9 +167,39 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                 'backend':'Qwen3.5 / Qwen3 / GPT-2 from scratch + byte-level BPE + PyTorch DDP',
                 'active_job_id':manager.active_id if manager.active_kind=='jobs' and identities.allowed(p,'job',manager.active_id) else None,
                 'identity':{'subject':p.subject,'role':p.role,'project':p.project},
-                'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes},
+                'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes,'max_log_bytes':manager.max_log_bytes,'gpu_idle_mib':manager.gpu_idle_mib},
+                'control':manager.control(),'blocked_reason':manager.blocked_reason,'scheduler_error':manager.scheduler_error,
+                'worker_kind':manager.active_kind,'execution_blocked':manager.active_id is None and not manager.lease_available(),
+                'environment':'production' if production else 'development',
                 'scheduler_alive':bool(manager.thread and manager.thread.is_alive()),
                 'disk':dict(zip(('total','used','free'),shutil.disk_usage(state)))}
+
+    @app.post('/api/scheduler/control')
+    def scheduler_control(config: SchedulerControl,p=Depends(auth)):
+        if p.role!='admin':raise HTTPException(403,'仅管理员可改变维护模式')
+        return manager.set_control(config.paused,config.reason.strip(),p.subject)
+
+    @app.get('/api/operations')
+    def operations(p=Depends(auth)):
+        if p.role!='admin':raise HTTPException(403,'仅管理员可查看运维诊断')
+        with manager.db() as db:
+            integrity=db.execute('PRAGMA quick_check(1)').fetchone()[0]
+            jobs=dict(db.execute('SELECT status,COUNT(*) FROM jobs GROUP BY status').fetchall())
+            tests=dict(db.execute('SELECT status,COUNT(*) FROM model_tests GROUP BY status').fetchall())
+        versions={}
+        for package in ('torch','transformers','fastapi','accelerate'):
+            try:versions[package]=importlib.metadata.version(package)
+            except importlib.metadata.PackageNotFoundError:versions[package]='未安装'
+        return {'generated_at':now(),'environment':'production' if production else 'development',
+            'service_version':6,'revision':os.environ.get('TRAINLAB_REVISION','local'),'platform':platform.system()+' '+platform.machine(),'python':platform.python_version(),'packages':versions,
+            'started_at':manager.started_at,'scheduler_alive':bool(manager.thread and manager.thread.is_alive()),
+            'scheduler_error':manager.scheduler_error,'control':manager.control(),'blocked_reason':manager.blocked_reason,
+            'execution_blocked':manager.active_id is None and not manager.lease_available(),
+            'active':{'id':manager.active_id,'kind':manager.active_kind},'jobs':jobs,'model_tests':tests,
+            'database_integrity':integrity,'disk':dict(zip(('total','used','free'),shutil.disk_usage(state))),
+            'host_memory':{'total':psutil.virtual_memory().total,'available':psutil.virtual_memory().available},
+            'gpu':gpu_inventory(),'limits':{'min_free_bytes':manager.min_free_bytes,'max_pending':manager.max_pending,'max_log_bytes':manager.max_log_bytes,'gpu_idle_mib':manager.gpu_idle_mib},
+            'scope':'服务自检；主机内存不是容器内存配额。未代替 CUDA/NCCL、模型质量、吞吐与恢复演练验收。'}
 
     @app.get('/api/architectures')
     def architectures(p=Depends(auth)):
@@ -213,9 +254,11 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
             clause='' if project is None else " JOIN resource_acl a ON a.kind='job' AND a.id=j.id WHERE a.project=?"
             args=() if project is None else (project,)
             counts=dict(db.execute('SELECT j.status,COUNT(*) FROM jobs j'+clause+' GROUP BY j.status',args).fetchall())
+            test_clause='' if project is None else " JOIN resource_acl a ON a.kind='job' AND a.id=t.job_id WHERE a.project=?"
+            tests=dict(db.execute('SELECT t.status,COUNT(*) FROM model_tests t'+test_clause+' GROUP BY t.status',args).fetchall())
             ds_clause='' if project is None else " JOIN resource_acl a ON a.kind='dataset' AND a.id=d.id WHERE a.project=?"
             ds=db.execute('SELECT COUNT(*),COALESCE(SUM(d.bytes),0) FROM datasets d'+ds_clause,args).fetchone()
-        return {'jobs':counts,'total_jobs':sum(counts.values()),'dataset_count':ds[0],'dataset_bytes':ds[1]}
+        return {'jobs':counts,'model_tests':tests,'total_jobs':sum(counts.values()),'dataset_count':ds[0],'dataset_bytes':ds[1]}
 
     @app.get('/api/jobs/page')
     def jobs_page(q: str=Query(default='',max_length=80), status: str=Query(default='',max_length=20),

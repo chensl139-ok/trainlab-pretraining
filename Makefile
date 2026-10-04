@@ -12,6 +12,7 @@ check: test
 	node --check dist/gpu-core.js
 	node --check dist/app.js
 	node --check dist/navigation.js
+	node --check dist/entry.js
 	$(PYTHON) -m pip check
 audit:
 	$(AUDITOR) -r server/requirements-api.txt

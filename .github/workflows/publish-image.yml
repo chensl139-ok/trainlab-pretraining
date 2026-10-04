@@ -43,7 +43,7 @@ jobs:
           df -h /
       - name: Build Linux amd64 image
         run: |
-          docker build --platform linux/amd64 \
+          docker build --platform linux/amd64 --build-arg TRAINLAB_REVISION="$GITHUB_SHA" \
             --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             --label org.opencontainers.image.description="Single-node GPU text pretraining workbench" \
@@ -73,6 +73,22 @@ jobs:
           if [ "$ready" != true ]; then docker logs trainlab-check; exit 1; fi
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18000/api/system)" = 401
           curl --fail --silent http://127.0.0.1:18000/gpu.html > /dev/null
+          docker exec trainlab-check python -m scripts.users issue --subject image-check --project ci --role admin --days 1 --credential-file /state/ci.key
+          docker exec -i trainlab-check python - <<'PY_CHECK'
+          import json, pathlib, urllib.request
+          token=pathlib.Path('/state/ci.key').read_text().strip()
+          def call(path,body=None):
+              data=None if body is None else json.dumps(body).encode()
+              request=urllib.request.Request('http://127.0.0.1:8000/api/'+path,data=data,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+              return json.load(urllib.request.urlopen(request,timeout=10))
+          report=call('operations')
+          assert report['service_version']==6 and report['database_integrity']=='ok'
+          assert call('scheduler/control',{'paused':True,'reason':'CI image check'})['paused']
+          assert call('system')['control']['paused']
+          assert call('ready')['ready']
+          assert not call('scheduler/control',{'paused':False})['paused']
+          print('Authenticated operations and maintenance controls passed in the production image.')
+          PY_CHECK
           docker rm -f trainlab-check
       - name: Sign in to GHCR
         env:

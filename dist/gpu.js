@@ -55,21 +55,47 @@ $('#login').onsubmit=event=>{event.preventDefault();connect($('#token').value.tr
 function paintSystem(data,initial=false){
   system=data;canWrite=['admin','operator'].includes(data.identity?.role);const identity=data.identity;
   $('#connection').textContent=identity?`${identity.subject} · ${identity.role==='viewer'?'只读':identity.project}`:'已连接';
-  $('#notice').classList.remove('stale');$('#notice').textContent=`${data.scheduler_alive?'调度器运行中':'调度器未就绪'} · ${!canWrite?'只读访问':data.gpus?.length?'可提交实验':'等待 GPU 就绪'} · 单机串行 DDP · 数据保留在服务器`;
+  $('#notice').classList.remove('stale');$('#notice').textContent=`${data.control?.paused?'维护模式':data.blocked_reason||data.execution_blocked?'等待资源 / 检查':data.scheduler_alive?'调度器运行中':'调度器未就绪'} · ${data.control?.paused?'已停止新任务接收':!canWrite?'只读访问':data.gpus?.length?'可提交任务':'等待 GPU 就绪'} · 单机串行 DDP · 数据保留在服务器`;
   const gpus=data.gpus||[];$('#gpu-description').textContent=gpus.length?`${gpus.length} 张 GPU 在线`:'未检测到 GPU';
   $('#gpu-cards').innerHTML=gpus.length?gpus.map(g=>`<article class="gpu-card"><div class="gpu-top"><strong>GPU ${g.index}</strong><span>${number(g.utilization_percent)}% 利用率</span></div><p title="${esc(g.name)}">${esc(g.name)}</p><div class="vram">${(g.memory_used_mib/1024).toFixed(1)} <small>/ ${(g.memory_total_mib/1024).toFixed(1)} GiB</small></div><div class="progress-track"><div style="width:${Math.min(100,g.memory_used_mib/g.memory_total_mib*100)}%"></div></div><p>驱动 ${esc(g.driver)}</p></article>`).join(''):'<div class="gpu-empty"><span aria-hidden="true">▥</span><div><b>尚无可用的 NVIDIA GPU</b><p>可以准备语料和配置；提交训练前请检查驱动与容器 GPU 挂载。</p></div></div>';
   const previous=all('[name=gpu]:checked').map(x=>+x.value),newIds=gpus.map(g=>g.index).join(',');
   if(initial||$('#gpu-select').dataset.ids!==newIds){$('#gpu-select').dataset.ids=newIds;$('#gpu-select').innerHTML=gpus.length?gpus.map((g,i)=>`<label><input type="checkbox" name="gpu" value="${g.index}" ${(initial?i===0:previous.includes(g.index))?'checked':''}> ${g.index}</label>`).join(''):'<span class="mini-note">等待可用 GPU</span>';all('[name=gpu]').forEach(x=>x.onchange=updateForm);}
   $('#stat-disk').textContent=size(data.disk?.free);$('#stat-disk-note').textContent=data.disk?.free<data.limits?.min_free_bytes?'低于运行水位，请先释放空间':`最低保留 ${size(data.limits?.min_free_bytes)}`;
-  updateForm();
+  paintOperations(data);updateForm();
 }
+function paintOperations(data){
+  const paused=!!data.control?.paused,blocked=!!(data.blocked_reason||data.scheduler_error||data.execution_blocked),alive=!!data.scheduler_alive;
+  $('#environment-badge').textContent=data.environment==='production'?'生产配置':'开发预览';
+  $('#environment-badge').title='运行配置标识，不代表 GPU 已通过验收';
+  $('#operations').classList.toggle('paused',paused);$('#operations').classList.toggle('blocked',blocked||!alive);
+  $('#scheduler-state').textContent=!alive?'调度器异常':paused?'维护模式':blocked?'等待资源 / 检查':'运行中';
+  $('#scheduler-detail').textContent=data.scheduler_error||data.blocked_reason||(data.execution_blocked?'工作进程仍持有执行锁，禁止启动新任务；等待退出或检查容器状态。':paused?'新训练和测试已停止接收，队列暂停派发。'+(data.control.reason?' 原因：'+data.control.reason:''):'任务按提交顺序串行执行。启动前检查磁盘和 GPU 占用；异常不会自动重跑。');
+  $('#worker-kind').textContent=data.worker_kind==='jobs'?'训练任务正在运行':data.worker_kind==='model_tests'?'模型测试正在运行':'当前空闲';
+  $('#runtime-guards').textContent=`磁盘保留 ${size(data.limits?.min_free_bytes)} · 日志上限 ${size(data.limits?.max_log_bytes)}`;
+  $('#maintenance-toggle').hidden=$('#diagnostics').hidden=data.identity?.role!=='admin';
+  $('#maintenance-toggle').textContent=paused?'退出维护模式':'进入维护模式';
+  $('#operations-note').textContent=paused?'备份前请等待当前任务结束并停止服务。维护模式会跨重启保留，恢复派发需手动退出。':'GPU 显存占用超过 '+number(data.limits?.gpu_idle_mib)+' MiB 时等待释放；此门槛不等同于模型显存容量估算。';
+}
+$('#maintenance-toggle').onclick=()=>{
+  const paused=!system?.control?.paused;
+  openDialog(paused?'进入维护模式？':'恢复任务调度？',paused?'<p>当前训练或测试继续运行；排队任务保留但不启动。新训练、恢复训练和模型测试将被拒绝。设置在重启后保留。</p><label class="field"><span>维护说明</span><input id="maintenance-reason" maxlength="200" value="部署升级 / 维护检查"></label>':'<p>排队任务将按顺序继续启动，并重新允许提交训练和测试。请确认维护已完成。</p>',paused?'进入维护模式':'恢复调度',async()=>{
+    const control=await api('/scheduler/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paused,reason:paused?$('#maintenance-reason').value:''})});
+    system.control=control;paintOperations(system);await refresh();toast(paused?'已进入维护模式':'任务调度已恢复');
+  });
+};
+$('#diagnostics').onclick=async()=>{
+  const version=session;$('#diagnostics').disabled=true;
+  try{const report=await api('/operations');if(version!==session)return;
+    openDialog('运行诊断',`<p>生成于 ${date(report.generated_at)}。仅检查当前服务状态，不代表目标 GPU 验收已完成。</p><div class="diagnostics-grid"><div>数据库完整性<strong>${esc(report.database_integrity)}</strong></div><div>调度器<strong>${report.scheduler_alive?'在线':'异常'} · ${report.control.paused?'维护中':'可派发'}</strong></div><div>可用磁盘<strong>${size(report.disk.free)}</strong></div><div>主机可用内存<strong>${size(report.host_memory.available)}</strong></div></div><p class="mini-note">报告不包含凭据、提示词和语料内容；包含设备与版本信息。</p><details><summary>查看完整诊断字段</summary><pre class="diagnostic-json">${esc(JSON.stringify(report,null,2))}</pre></details>`,'下载诊断 JSON',async()=>{downloadBlob(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),'trainlab-diagnostics.json');});$('#dialog-kicker').textContent='服务自检';$('#dialog-back').textContent='关闭';
+  }catch(error){showError(error);}finally{$('#diagnostics').disabled=false;}
+};
 function readConfig(){const c={...UI.defaults};for(const key of Object.keys(UI.defaults)){if(key==='gpu_ids'){c[key]=all('[name=gpu]:checked').map(x=>+x.value);continue;}if(key==='max_runtime_seconds'){c[key]=Number($('#runtime_minutes').value)*60;continue;}const el=$('#'+key);c[key]=typeof UI.defaults[key]==='number'?Number(el.value):typeof UI.defaults[key]==='boolean'?el.checked:el.value;}c.name=c.name.trim();return c;}
 function inferPreset(c){return Object.entries({tiny:[6,384,6],small:[12,768,12],medium:[24,1024,16]}).find(([,v])=>v[0]===c.layers&&v[1]===c.hidden_size&&v[2]===c.heads)?.[0]||'custom';}
 function applyConfig(c){c={...UI.defaults,...c,architecture:c.architecture||'gpt2'};for(const key of Object.keys(UI.defaults)){if(key==='gpu_ids'){all('[name=gpu]').forEach(el=>el.checked=(c.gpu_ids||[]).includes(+el.value));continue;}if(key==='max_runtime_seconds'){$('#runtime_minutes').value=c[key]/60;continue;}const el=$('#'+key);if(typeof UI.defaults[key]==='boolean')el.checked=c[key];else el.value=c[key]??UI.defaults[key];}$('#preset').value=inferPreset(c);$('#advanced').open=inferPreset(c)==='custom';datasetMeta();updateForm();}
-function errorsFor(c){const errors=UI.validate(c);if(!datasets.some(d=>d.id===c.dataset_id)&&c.dataset_id)errors.push('当前账号无权访问所选语料，请重新选择');if(c.gpu_ids.some(id=>!system?.gpus.some(g=>g.index===id)))errors.push('所选 GPU 已离线，请重新选择');if(!system?.scheduler_alive)errors.push('调度器未就绪，请检查服务');if(system?.disk?.free<system?.limits?.min_free_bytes)errors.push('磁盘低于运行水位，请释放空间');return errors;}
+function errorsFor(c){const errors=UI.validate(c);if(!datasets.some(d=>d.id===c.dataset_id)&&c.dataset_id)errors.push('当前账号无权访问所选语料，请重新选择');if(c.gpu_ids.some(id=>!system?.gpus.some(g=>g.index===id)))errors.push('所选 GPU 已离线，请重新选择');if(system?.control?.paused)errors.push('维护模式下暂不接收新任务');if(!system?.scheduler_alive)errors.push('调度器未就绪，请检查服务');if(system?.disk?.free<system?.limits?.min_free_bytes)errors.push('磁盘低于运行水位，请释放空间');return errors;}
 function updateForm(){
   const architecture=$('#architecture').value;$('#kv-field').hidden=$('#mlp-field').hidden=architecture==='gpt2';$('#architecture-note').textContent=({qwen3_5:'Qwen3.5 纯文本稠密架构 · Gated DeltaNet + 全注意力混合。随机初始化、自训 BPE；当前为参考内核，先小规模验证。',qwen3:'Qwen3 稠密架构 · GQA + QK-Norm + RoPE + SwiGLU。随机初始化、自训 BPE，不加载官方预训练权重。',gpt2:'GPT-2 架构 · 标准多头注意力 + 学习式位置编码。保持已有实验和检查点兼容。'})[architecture];
-  const c=readConfig(),e=UI.estimate(c),errors=errorsFor(c);$('#budget').innerHTML=`<div class="budget-values"><span>参数量（估计）<b>${Number.isFinite(e.parameters)?(e.parameters/1e6).toFixed(1)+'M':'—'}</b></span><span>有效 Batch<b>${number(e.batch)}</b></span></div>每次更新 ${number(e.tokensPerStep)} tokens<br>计划处理 ${Number.isFinite(e.totalTokens)?(e.totalTokens/1e6).toFixed(2)+'M':'—'} tokens（含重复遍历）<small>按词表上限估计；此值不保证显存足够。</small>`;
+  const c=readConfig(),e=UI.estimate(c),errors=errorsFor(c);$('#budget').innerHTML=`<div class="budget-values"><span>参数量（估计）<b>${Number.isFinite(e.parameters)?(e.parameters/1e6).toFixed(1)+'M':'—'}</b></span><span>有效 Batch<b>${number(e.batch)}</b></span></div>每次更新 ${number(e.tokensPerStep)} tokens<br>计划处理 ${Number.isFinite(e.totalTokens)?(e.totalTokens/1e6).toFixed(2)+'M':'—'} tokens（含重复遍历）<small>按词表上限估计；此值不保证显存足够。</small><small>启动磁盘预留约 ${size(e.parameters*48+(datasets.find(d=>d.id===c.dataset_id)?.bytes||0)*8+(system?.limits?.min_free_bytes||0)+(system?.limits?.max_log_bytes||0))}（检查点、语料与水位估算）</small>`;
   $('#form-errors').textContent=!canWrite&&connected?'当前账号为只读；仍可查看和导出实验。':errors.slice(0,3).join('；');
   $('#submit-job').disabled=!connected||!canWrite||submitting||errors.length>0;$('#submit-job').textContent=submitting?'正在提交…':'检查配置并提交 →';
   $('#open-catalog').disabled=!connected||!canWrite;$('#upload').disabled=!connected||!canWrite||uploading||!selectedFile;$('#upload').textContent=uploading?'上传校验中…':'上传并校验';$('#select-all-gpus').disabled=!system?.gpus.length;$('#preview-dataset').disabled=!datasets.some(d=>d.id===$('#dataset_id').value);
@@ -121,7 +147,7 @@ async function loadJobs(){const revision=++listRevision,version=session;const qu
 }
 async function refresh(){
   if(!connected)return;if(refreshing){refreshQueued=true;return;}refreshing=true;const version=session;$('#refresh').disabled=true;
-  try{const [s,ds,overview]=await Promise.all([api('/system'),api('/datasets'),api('/overview')]);if(version!==session)return;paintSystem(s);datasets=ds;paintDatasets();$('#stat-active').textContent=number((overview.jobs.running||0)+(overview.jobs.cancelling||0));$('#stat-queue').textContent=`${overview.jobs.queued||0} 个排队中`;$('#stat-complete').textContent=number(overview.jobs.succeeded||0);$('#stat-total').textContent=`共 ${overview.total_jobs} 个实验 · ${(overview.jobs.failed||0)+(overview.jobs.interrupted||0)} 个需检查`;$('#stat-datasets').textContent=number(overview.dataset_count);$('#stat-data-size').textContent=size(overview.dataset_bytes);await loadJobs();await loadDetail();if(version!==session)return;$('#last-sync').textContent='同步于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});}
+  try{const [s,ds,overview]=await Promise.all([api('/system'),api('/datasets'),api('/overview')]);if(version!==session)return;paintSystem(s);datasets=ds;paintDatasets();const tests=overview.model_tests||{};$('#test-queue-summary').textContent=`${(tests.running||0)+(tests.cancelling||0)} 个运行 · ${tests.queued||0} 个排队 · ${(tests.failed||0)+(tests.interrupted||0)} 个需检查`;$('#stat-active').textContent=number((overview.jobs.running||0)+(overview.jobs.cancelling||0));$('#stat-queue').textContent=`${overview.jobs.queued||0} 个排队中`;$('#stat-complete').textContent=number(overview.jobs.succeeded||0);$('#stat-total').textContent=`共 ${overview.total_jobs} 个实验 · ${(overview.jobs.failed||0)+(overview.jobs.interrupted||0)} 个需检查`;$('#stat-datasets').textContent=number(overview.dataset_count);$('#stat-data-size').textContent=size(overview.dataset_bytes);await loadJobs();await loadDetail();if(version!==session)return;$('#last-sync').textContent='同步于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});}
   catch(error){if(version===session){$('#notice').classList.add('stale');$('#notice').textContent='同步中断 · 当前显示最近成功获取的数据；请检查网络并点击刷新';showError(error);}}
   finally{refreshing=false;$('#refresh').disabled=false;if(refreshQueued){refreshQueued=false;if(connected)refresh();}}
 }
@@ -175,7 +201,7 @@ function paintTestControls(j){
   const ds=$('#test-dataset'),dsSignature=JSON.stringify([j.id,datasets.map(d=>[d.id,d.name])]);
   if(ds.dataset.signature!==dsSignature){const previous=ds.value;ds.innerHTML='<option value="">原训练任务的验证集</option>'+datasets.filter(d=>d.id!==j.config.dataset_id).map(d=>`<option value="${d.id}">${esc(d.name)}</option>`).join('');ds.value=[...ds.options].some(x=>x.value===previous)?previous:'';ds.dataset.signature=dsSignature;}
   $('#test-availability').textContent=models.length?`${UI.architectureNames[j.config.architecture||'gpt2']} · ${j.config.layers} 层 · 上下文 ${j.config.seq_length} tokens · ${models.length} 个可测试版本`:'等待训练停止并写出完整模型或检查点后，即可测试。';
-  $('#submit-test').disabled=!canWrite||!models.length||testSubmitting;$('#submit-test').textContent=testSubmitting?'正在提交…':$('#test-mode').value==='generate'?'运行续写测试 →':'运行语料评估 →';
+  $('#submit-test').disabled=!canWrite||!models.length||testSubmitting||!!system?.control?.paused;$('#submit-test').textContent=testSubmitting?'正在提交…':$('#test-mode').value==='generate'?'运行续写测试 →':'运行语料评估 →';
 }
 $('#test-mode').onchange=()=>{const score=$('#test-mode').value==='score';$('#generation-fields').hidden=score;$('#score-fields').hidden=!score;$('#test-prompt').required=!score;if(detailData)paintTestControls(detailData);};
 $('#test-prompt').required=true;
@@ -198,7 +224,7 @@ async function loadTests(){
 function paintTestResult(){
   const t=testItems.find(x=>x.id===selectedTest),box=$('#test-result');box.hidden=!t;if(!t){delete box.dataset.signature;return;}const signature=JSON.stringify(t);if(box.dataset.signature===signature)return;box.dataset.signature=signature;const r=t.result;
   let body=r?(r.mode==='generate'?`<h4>输入提示词</h4><pre>${esc(r.prompt)}</pre><h4>模型续写</h4><pre class="result-text">${esc(r.completion||'模型输出了结束符或仅含特殊符号，没有可展示的文本。')}</pre><p class="mini-note">输入 ${r.prompt_tokens} tokens · 新增 ${r.generated_tokens} tokens · ${r.generation_seconds.toFixed(2)} 秒 · ${r.tokens_per_second?.toFixed(1)||'—'} tokens/s</p>`:`<div class="job-metrics"><div><small>评估 Loss</small><b>${r.loss.toFixed(4)}</b></div><div><small>Perplexity</small><b>${r.perplexity?.toFixed(2)||'超出范围'}</b></div><div><small>有效 tokens</small><b>${number(r.evaluated_tokens)}</b></div></div><p class="mini-note">${r.blocks} 个完整块 · 每块 ${r.sequence_length} tokens · ${r.source==='training_validation'?'原验证集':'另选评估语料'}</p><details><summary>复现与比较条件</summary><p>语料 SHA256：<code>${esc(r.dataset_sha256)}</code></p><p>分词器 SHA256：<code>${esc(r.tokenizer_sha256)}</code></p></details>`):`<p>${t.status==='queued'?'正在排队，前面的训练或测试结束后开始。':t.status==='running'?'正在加载模型并执行测试…':names[t.status]||esc(t.status)}</p>`;
-  if(t.error)body+=`<pre>${esc(t.error)}</pre>`;
+  if(t.error){const last=t.error.trim().split('\n').at(-1);body+=`<p class="job-error">${esc(last)}</p><details class="test-error-details"><summary>查看错误详情</summary><pre>${esc(t.error)}</pre></details>`;}
   box.innerHTML=`<div class="result-actions"><button id="reuse-test" class="text-button">复用测试条件</button>${r?'<button id="export-test" class="text-button">下载结果 JSON</button>':''}</div>${body}${r?`<p class="mini-note">${esc(r.note)}</p>`:''}`;
   $('#reuse-test').onclick=()=>{const c=t.config;$('#test-mode').value=c.mode;$('#test-prompt').value=c.prompt;$('#test-new-tokens').value=c.max_new_tokens;$('#test-temperature').value=c.temperature;$('#test-top-p').value=c.top_p;$('#test-seed').value=c.seed;$('#test-timeout').value=c.max_runtime_seconds;$('#test-blocks').value=c.max_blocks;$('#test-dataset').value=c.dataset_id||'';const target=c.device==='cuda'?'cuda:'+c.gpu_id:'cpu';$('#test-device').value=[...$('#test-device').options].some(o=>o.value===target)?target:'cpu';$('#test-mode').onchange();toast('已复用测试条件，可切换检查点后再次运行');};
   if(r)$('#export-test').onclick=()=>downloadBlob(new Blob([JSON.stringify(t,null,2)],{type:'application/json'}),'model-test-'+t.id.slice(0,8)+'.json');

@@ -81,7 +81,8 @@ def test_scheduler_runs_tests_and_training_serially_and_persists_results(system,
     c,k=system;jid=completed(c,k);m=c.app.state.manager
     t=c.post(f'/api/jobs/{jid}/tests',json={'prompt':'test'},headers=k['alice']).json()
     result=m.testdir(t['id'])/'result.json'
-    code='import time,pathlib;time.sleep(.2);pathlib.Path('+repr(str(result))+').write_text(\'{"completion":"real child result"}\')'
+    payload=json.dumps({'mode':'generate','checkpoint':'final','prompt':'test','completion':'real child result','prompt_tokens':1,'generated_tokens':3,'generation_seconds':.1,'tokens_per_second':30})
+    code='import time,pathlib;time.sleep(.2);pathlib.Path('+repr(str(result))+').write_text('+repr(payload)+')'
     monkeypatch.setattr(m,'test_command',lambda j,cards:([sys.executable,'-c',code],{}))
     m.start()
     try:
@@ -108,3 +109,10 @@ def test_original_training_dataset_cannot_be_relabeled_as_external_test(system):
     did=m.get(jid)['config']['dataset_id']
     r=c.post(f'/api/jobs/{jid}/tests',json={'mode':'score','dataset_id':did},headers=k['alice'])
     assert r.status_code==422 and '相同' in r.text
+
+
+def test_invalid_test_result_is_rejected():
+    from server.model_tests import validate_result
+    config={'mode':'score','checkpoint':'final'}
+    for result in ([],{}, {'mode':'score','checkpoint':'final'}, {'mode':'score','checkpoint':'final','loss':float('nan'),'blocks':1,'sequence_length':64,'evaluated_tokens':63}):
+        with pytest.raises(ValueError):validate_result(result,config)
