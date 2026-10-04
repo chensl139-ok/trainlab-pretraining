@@ -1,8 +1,24 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TrainLab · GPU 预训练工作台</title><meta name="description" content="从语料准备到检查点恢复的单机文本预训练工作台"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="gpu.css"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23191c26'/%3E%3Cpath d='M8 9h16v4h-6v12h-4V13H8z' fill='%23c4f36b'/%3E%3C/svg%3E"></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TrainLab · GPU 预训练工作台</title><meta name="description" content="从语料准备到检查点恢复的单机文本预训练工作台"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="gpu.css"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23191c26'/%3E%3Cpath d='M8 9h16v4h-6v12h-4V13H8z' fill='%23c4f36b'/%3E%3C/svg%3E"><link rel="stylesheet" href="navigation.css"></head>
 <body><a href="#main" class="skip-link">跳到工作台</a>
-<aside class="sidebar"><a class="brand" href="/"><span class="brandmark">T</span>TrainLab<span class="beta">STUDIO</span></a><div class="workspace"><span class="avatar">研</span><div>个人训练空间<small>SELF-HOSTED · LINUX</small></div></div><div class="navlabel">工作空间</div><nav aria-label="主导航"><a href="/" title="学习实验室"><span aria-hidden="true">◫</span><b>学习实验室</b></a><a href="/gpu.html" class="active" aria-current="page" title="GPU 预训练"><span aria-hidden="true">▥</span><b>GPU 预训练</b></a><a href="/#learn" title="训练知识库"><span aria-hidden="true">▤</span><b>训练知识库</b></a><a href="/deploy-guide.txt" target="_blank" rel="noopener" title="部署说明"><span aria-hidden="true">⌘</span><b>部署说明 ↗</b></a><a href="/production-readiness.txt" target="_blank" rel="noopener" title="验收与运维"><span aria-hidden="true">✓</span><b>验收与运维 ↗</b></a></nav><div class="side-note"><span>你的数据，你的模型。</span><p>随机权重初始化<br>真实训练 · 本地存储<br>单卡验证 → 八卡扩展</p></div><div class="profile"><span class="avatar">P</span><div>TrainLab<small>单机预训练 · v4</small></div></div></aside>
-<div class="shell"><header><span class="breadcrumb">工作空间 <span class="slash">/</span> <b>GPU 预训练</b></span><div class="header-actions"><span id="connection" class="local-pill">正在检查连接</span><button id="logout" class="button compact" hidden>断开连接</button></div></header>
+<aside class="sidebar" id="site-sidebar" aria-label="工作空间导航">
+<div class="nav-brand-row"><a class="brand" href="/#training" aria-label="TrainLab 学习实验"><span class="brandmark">T</span>TrainLab<span class="beta">STUDIO</span></a><button class="nav-close" aria-label="关闭导航">×</button></div>
+<div class="workspace"><span class="avatar">研</span><div>个人训练空间<small>学习 · 实验 · 预训练</small></div></div>
+<nav aria-label="主导航">
+<div class="navlabel">服务器训练</div>
+<a data-nav="gpu" href="/gpu.html"><span class="nav-icon" aria-hidden="true">▥</span><span class="nav-text">GPU 预训练</span></a>
+<div class="navlabel">浏览器学习实验</div>
+<a data-nav="training" href="/#training"><span class="nav-icon" aria-hidden="true">◫</span><span class="nav-text">MLP 训练实验</span></a>
+<a data-nav="experiments" href="/#experiments"><span class="nav-icon" aria-hidden="true">⌁</span><span class="nav-text">MLP 实验记录</span></a>
+<a data-nav="data" href="/#data"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-text">教学数据集</span></a>
+<a data-nav="llm" href="/#llm"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">微调配置练习</span></a>
+<div class="navlabel">学习资料</div>
+<a data-nav="learn" href="/#learn"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-text">训练知识库</span></a>
+<a href="/deploy-guide.txt" target="_blank" rel="noopener"><span class="nav-icon" aria-hidden="true">⌘</span><span class="nav-text">部署说明</span><span class="nav-external" aria-label="新标签页打开">↗</span></a>
+<a href="/production-readiness.txt" target="_blank" rel="noopener"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-text">验收与运维</span><span class="nav-external" aria-label="新标签页打开">↗</span></a>
+</nav><div class="nav-footnote">GPU 任务在服务器运行<br>教学实验在当前浏览器运行</div></aside>
+<button class="nav-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
+<div class="shell"><header><button class="nav-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="site-sidebar">☰ <span>导航</span></button><span class="breadcrumb">工作空间 <span class="slash">/</span> <b>GPU 预训练</b></span><div class="header-actions"><span id="connection" class="local-pill">正在检查连接</span><button id="logout" class="button compact" hidden>断开连接</button></div></header>
 <main id="main"><div class="page-title"><div><div class="eyebrow">BUILD YOUR FIRST LANGUAGE MODEL</div><h1>GPU 预训练<span class="title-tag">FROM SCRATCH</span></h1><p>准备语料，配置实验，让每一次训练都可追溯。</p></div><div class="title-actions"><a href="/deploy-guide.txt" class="button" target="_blank" rel="noopener">部署指南 ↗</a><button id="refresh" class="button" hidden>↻ 刷新</button></div></div>
 <div id="notice" class="connection-banner" role="status">正在检查训练服务…</div>
 <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="dismiss-error" type="button" aria-label="关闭错误提示">×</button></div>
@@ -42,4 +58,4 @@
 <section id="tab-artifacts" role="tabpanel" aria-labelledby="tab-button-artifacts" hidden><p class="metric-label">模型配置、权重和分词器需保持原目录结构。单文件大于 256 MiB 时请在服务器复制。</p><div id="artifact-list" class="artifact-list"></div></section></div></section></div></div></section>
 <footer>TrainLab <span>真实指标 · 可恢复实验</span><span>GPU 实机验收尚需在目标服务器执行</span></footer></main></div>
 <dialog id="action-dialog" aria-labelledby="dialog-title"><form method="dialog"><button class="dialog-close" aria-label="关闭对话框" value="cancel">×</button></form><span class="step-label" id="dialog-kicker">确认操作</span><h2 id="dialog-title"></h2><div id="dialog-body"></div><div class="dialog-actions"><button id="dialog-back" class="button">返回</button><button id="dialog-confirm" class="button primary">确认</button></div></dialog>
-<div id="toast" role="status" aria-live="polite"></div><script src="gpu-core.js"></script><script src="gpu.js"></script></body></html>
+<div id="toast" role="status" aria-live="polite"></div><script src="navigation.js"></script><script src="gpu-core.js"></script><script src="gpu.js"></script></body></html>
