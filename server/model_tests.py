@@ -78,6 +78,7 @@ class ModelTestQueue:
                 pending=db.execute("SELECT COUNT(*) FROM model_tests WHERE status IN ('queued','running','cancelling')").fetchone()[0]
                 pending+=db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','cancelling')").fetchone()[0]
                 ds=db.execute('SELECT * FROM datasets WHERE id=?',(config.get('dataset_id'),)).fetchone()
+                fmt=db.execute('SELECT format FROM dataset_formats WHERE id=?',(config.get('dataset_id'),)).fetchone()
             if pending>=self.max_pending:raise ValueError('任务队列已达上限，请等待完成')
             if shutil.disk_usage(self.root).free<self.min_free_bytes:raise ValueError('可用磁盘低于安全水位')
             if config['device']=='cpu':
@@ -86,9 +87,11 @@ class ModelTestQueue:
             train_config=json.loads((self.jobdir(jid)/'config.json').read_text())
             if config.get('dataset_id'):
                 if not ds:raise ValueError('评估语料不存在')
+                if (fmt['format'] if fmt else 'pretrain')!=train_config.get('stage','pretrain'):raise ValueError('评估语料格式必须与任务阶段一致')
                 if ds['sha256']==train_config.get('dataset_sha256'):raise ValueError('另选评估语料不能与训练语料相同；可选择已有验证集')
             tid=uuid.uuid4().hex;folder=self.testdir(tid);folder.mkdir()
             payload={**config,'train_config':train_config,'model_path':str(path),'validation_path':str(self.jobdir(jid)/'output'/'prepared'/'validation.bin'),
+                'validation_post_path':str(self.jobdir(jid)/'output'/'prepared'/'validation.jsonl'),
                 'dataset_path':str(self.root/'datasets'/(ds['id']+'.jsonl')) if ds else None,'dataset_sha256':ds['sha256'] if ds else None,
                 'result_path':str(folder/'result.json')}
             (folder/'config.json').write_text(json.dumps(payload,ensure_ascii=False))

@@ -98,7 +98,11 @@ def run(config, cpu_smoke=False):
     output=Path(config['output_dir'])
     output.mkdir(parents=True,exist_ok=True)
     if rank==0:
-        meta=prepare(config,output)
+        if config.get('stage','pretrain')=='pretrain':
+            meta=prepare(config,output)
+        else:
+            from server.posttraining import prepare_post
+            meta=prepare_post(config,output)
         print(json.dumps({'event':'data_prepared',**meta},ensure_ascii=False),flush=True)
     if world>1:
         torch.distributed.barrier()
@@ -107,7 +111,19 @@ def run(config, cpu_smoke=False):
     from server.architectures import model_config,model_class
     architecture=config.get('architecture','gpt2')
     # Explicit architecture class + new config creates RANDOM weights; no download.
-    model=model_class(architecture)(model_config(config,len(tokenizer),tokenizer.pad_token_id,tokenizer.eos_token_id))
+    stage=config.get('stage','pretrain')
+    reference=None
+    if stage=='pretrain':
+        model=model_class(architecture)(model_config(config,len(tokenizer),tokenizer.pad_token_id,tokenizer.eos_token_id))
+    else:
+        model=model_class(architecture).from_pretrained(config['base_model_path'],local_files_only=True,use_safetensors=True)
+        model.config.use_cache=False
+        if stage=='dpo':
+            reference=model_class(architecture).from_pretrained(config['base_model_path'],local_files_only=True,use_safetensors=True)
+            for candidate in (model,reference):
+                for module in candidate.modules():
+                    if isinstance(module,torch.nn.Dropout):module.p=0.
+            reference.requires_grad_(False).eval()
 
     class PackedDataset(Dataset):
         def __init__(self,path,length):
@@ -147,10 +163,19 @@ def run(config, cpu_smoke=False):
         gradient_checkpointing_kwargs={'use_reentrant':False},
         ddp_find_unused_parameters=False,report_to=[],dataloader_num_workers=0,
         disable_tqdm=True,remove_unused_columns=False)
-    train_data=PackedDataset(output/'prepared'/'train.bin',config['seq_length'])
-    val_data=PackedDataset(output/'prepared'/'validation.bin',config['seq_length'])
-    trainer=Trainer(model=model,args=args,train_dataset=train_data,eval_dataset=val_data,
-        processing_class=tokenizer,data_collator=default_data_collator,callbacks=[Metrics()])
+    trainer_type=Trainer;extra={};collate=default_data_collator
+    if stage=='pretrain':
+        train_data=PackedDataset(output/'prepared'/'train.bin',config['seq_length'])
+        val_data=PackedDataset(output/'prepared'/'validation.bin',config['seq_length'])
+    else:
+        from server.posttraining import PostDataset,collator,dpo_trainer_class
+        train_data=PostDataset(output/'prepared'/'train.jsonl')
+        val_data=PostDataset(output/'prepared'/'validation.jsonl')
+        collate=collator(tokenizer.pad_token_id,stage=='dpo')
+        if stage=='dpo':
+            trainer_type=dpo_trainer_class();extra={'reference':reference,'beta':config['dpo_beta']}
+    trainer=trainer_type(model=model,args=args,train_dataset=train_data,eval_dataset=val_data,
+        processing_class=tokenizer,data_collator=collate,callbacks=[Metrics()],**extra)
     if rank==0:
         print(json.dumps({'event':'model_initialized','parameters':model.num_parameters(),
             'architecture':architecture,'world_size':world,'effective_batch':config['micro_batch']*config['grad_accum']*world,
@@ -161,11 +186,12 @@ def run(config, cpu_smoke=False):
     if rank==0:
         tokenizer.save_pretrained(output/'final')
         loss=evaluation.get('eval_loss')
-        summary={'mode':'CPU smoke test' if cpu_smoke else 'GPU pretraining',
+        summary={'mode':'CPU smoke test' if cpu_smoke else 'GPU '+stage, 'stage':stage,
+                 'loss_kind':'DPO preference loss' if stage=='dpo' else 'response cross entropy' if stage=='sft' else 'next token cross entropy',
                  'parameters':model.num_parameters(),'architecture':architecture,'world_size':world,
                  'training':result.metrics,'validation':evaluation,
-                 'perplexity':math.exp(loss) if loss is not None and math.isfinite(loss) and loss<50 else None,
-                 'note':'同一分词器和验证集内比较；本任务没有独立测试集。',
+                 'perplexity':math.exp(loss) if stage!='dpo' and loss is not None and math.isfinite(loss) and loss<50 else None,
+                 'note':'DPO loss 不是语言困惑度；需独立偏好/业务评测。' if stage=='dpo' else '同一分词器、损失掩码和验证集内比较；本任务没有独立测试集。',
                  'config':{k:v for k,v in config.items() if k not in ['metrics_path','dataset_path','output_dir']}}
         temp=output/'summary.tmp'
         temp.write_text(json.dumps(summary,ensure_ascii=False,indent=2,allow_nan=False))

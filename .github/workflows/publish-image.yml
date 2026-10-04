@@ -51,12 +51,14 @@ jobs:
       - name: Verify training and resume in the actual image (CPU only)
         run: |
           for architecture in gpt2 qwen3 qwen3_5; do
+            extra=""
+            if [ "$architecture" = qwen3 ]; then extra="--post-training"; fi
             docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,size=1g,mode=1777 \
             --tmpfs /state:rw,size=1g,uid=10001,gid=10001 \
             --tmpfs /app/.runtime:rw,size=1g,uid=10001,gid=10001 \
             -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-              "$IMAGE:sha-$GITHUB_SHA" python -m scripts.smoke_train --architecture "$architecture"
+              "$IMAGE:sha-$GITHUB_SHA" python -m scripts.smoke_train --architecture "$architecture" $extra
           done
       - name: Verify production API with read-only filesystem
         run: |

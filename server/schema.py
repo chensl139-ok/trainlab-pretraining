@@ -2,9 +2,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class TrainConfig(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     name: str = Field(default='GPT 预训练实验', min_length=1, max_length=80)
     dataset_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+    stage: Literal['pretrain', 'sft', 'dpo'] = 'pretrain'
+    base_job_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    base_model_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    parameter_count: int = Field(default=0, ge=0, le=2000000000)
+    base_checkpoint: str = Field(default='final', pattern=r'^(final|checkpoint-[0-9]+)$')
+    dpo_beta: float = Field(default=0.1, gt=0, le=1)
     gpu_ids: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=8)
     architecture: Literal['gpt2', 'qwen3', 'qwen3_5'] = 'gpt2'
     kv_heads: int = Field(default=2, ge=1, le=32)
@@ -13,7 +19,7 @@ class TrainConfig(BaseModel):
     hidden_size: int = Field(default=384, ge=128, le=2048)
     heads: int = Field(default=6, ge=2, le=32)
     seq_length: int = Field(default=256, ge=64, le=2048)
-    vocab_size: int = Field(default=4096, ge=512, le=65536)
+    vocab_size: int = Field(default=4096, ge=512, le=262144)
     micro_batch: int = Field(default=2, ge=1, le=16)
     grad_accum: int = Field(default=8, ge=1, le=256)
     max_steps: int = Field(default=100, ge=10, le=1000000)
@@ -29,6 +35,10 @@ class TrainConfig(BaseModel):
 
     @model_validator(mode='after')
     def consistent(self):
+        if self.stage != 'pretrain' and bool(self.base_job_id)==bool(self.base_model_id):
+            raise ValueError('后训练必须且只能选择一个平台模型或导入模型')
+        if self.stage == 'pretrain' and (self.base_job_id or self.base_model_id):
+            raise ValueError('从零预训练不能指定基础模型')
         if self.hidden_size % self.heads:
             raise ValueError('hidden_size 必须能被 heads 整除')
         if self.architecture != 'gpt2':

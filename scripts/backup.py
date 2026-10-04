@@ -12,7 +12,7 @@ from pathlib import Path
 def exclusive(state):
     locks=[]
     try:
-        for name in ('scheduler.lock','execution.lock'):
+        for name in ('scheduler.lock','execution.lock','import.lock'):
             lock=(state/name).open('a');locks.append(lock)
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise RuntimeError('Stop TrainLab and wait for workers before backup or restore') from None
@@ -47,7 +47,7 @@ def backup(state,destination):
         with closing(sqlite3.connect(state/'trainlab.sqlite3')) as src,closing(sqlite3.connect(destination/'trainlab.sqlite3')) as dst:
             src.backup(dst)
             dst.execute('PRAGMA journal_mode=DELETE')
-        for name in ('datasets','jobs','tests'):
+        for name in ('datasets','jobs','tests','models'):
             if not (state/name).exists():continue
             for path in (state/name).rglob('*'):
                 if path.is_symlink():raise ValueError('Symlinks are not allowed in state backups')
@@ -63,8 +63,8 @@ def restore(snapshot,state):
         raise ValueError('Restore to the same absolute state mount path; configs contain checkpoint paths')
     state.mkdir(mode=0o700,parents=True,exist_ok=True)
     with exclusive(state):
-        if any(p.name not in ('scheduler.lock','execution.lock') for p in state.iterdir()):raise ValueError('Restore requires an empty state directory')
-        for name in ('datasets','jobs','tests'):
+        if any(p.name not in ('scheduler.lock','execution.lock','import.lock') for p in state.iterdir()):raise ValueError('Restore requires an empty state directory')
+        for name in ('datasets','jobs','tests','models'):
             if (snapshot/name).exists():shutil.copytree(snapshot/name,state/name)
         shutil.copy2(snapshot/'trainlab.sqlite3',state/'trainlab.sqlite3')
 

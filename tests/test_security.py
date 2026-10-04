@@ -118,12 +118,15 @@ def test_backup_restore_and_tampering(tmp_path):
     (m.root/'datasets'/'example.jsonl').write_text('{"text":"example"}')
     (m.root/'tests'/'example').mkdir(parents=True)
     (m.root/'tests'/'example'/'result.json').write_text('{"loss":1.25}')
+    (m.root/'models'/'fixture').mkdir()
+    (m.root/'models'/'fixture'/'config.json').write_text('{"model_type":"qwen3"}')
     snap=tmp_path/'snapshot';backup(m.root,snap)
     verify(snap);m.root.rename(tmp_path/'original-state')
     restore(snap,tmp_path/'state')
     restored=Manager(tmp_path/'state');assert AuthStore(restored).authenticate(raw).subject=='alice'
     assert (restored.root/'datasets'/'example.jsonl').read_text()=='{"text":"example"}'
     assert (restored.root/'tests'/'example'/'result.json').read_text()=='{"loss":1.25}'
+    assert (restored.root/'models'/'fixture'/'config.json').is_file()
     with pytest.raises(ValueError,match='empty'):restore(snap,restored.root)
     (snap/'datasets'/'example.jsonl').write_text('corrupted')
     with pytest.raises(ValueError,match='integrity'):verify(snap)

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import argparse
-parser=argparse.ArgumentParser();parser.add_argument('--architecture',choices=['gpt2','qwen3','qwen3_5'],default='gpt2');args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--architecture',choices=['gpt2','qwen3','qwen3_5'],default='gpt2');parser.add_argument('--post-training',action='store_true');args=parser.parse_args()
 from server.schema import TrainConfig
 root=Path(__file__).resolve().parent.parent
 corpus=root/'examples'/'sample-corpus.jsonl'
@@ -50,3 +50,7 @@ for mode,checkpoint in [('generate','checkpoint-5'),('generate','final'),('score
     if mode=='generate':assert 0<result['generated_tokens']<=8
     else:assert result['evaluated_tokens']>0 and result['loss']>0
 print('Model reload, generation, and held-out validation scoring passed:',args.architecture)
+
+if args.post_training:
+    from scripts.smoke_posttrain import run as post_smoke
+    post_smoke(work/'first'/'final',c,work,env)

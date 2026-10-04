@@ -6,6 +6,7 @@ ARCHITECTURES = [
 ]
 
 def parameter_estimate(c):
+    if c.get('parameter_count'):return c['parameter_count']
     h,l,v=c['hidden_size'],c['layers'],c['vocab_size']
     architecture=c.get('architecture','gpt2')
     if architecture=='gpt2':

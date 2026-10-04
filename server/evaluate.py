@@ -40,6 +40,30 @@ def score_blocks(config,tokenizer,length):
             pending=pending[pos:]
 
 
+
+def post_rows(config, tokenizer, length):
+    from server.posttraining import PostDataset, record_format, encode_pair
+    stage=config['train_config']['stage']
+    if not config.get('dataset_path'):
+        data=PostDataset(config['validation_post_path'])
+        for i in range(min(len(data),config['max_blocks'])):yield data[i]
+        return
+    path=Path(config['dataset_path'])
+    if digest(path)!=config['dataset_sha256']:raise ValueError('评估语料摘要不一致')
+    seen=set();count=0
+    with path.open() as f:
+        for line in f:
+            if not line.strip():continue
+            item=json.loads(line)
+            if record_format(item)!=stage:raise ValueError('评估语料格式与模型训练阶段不匹配')
+            key=json.dumps(item,sort_keys=True)
+            if key in seen:continue
+            seen.add(key)
+            yield encode_pair(tokenizer,item['prompt'],item['response'],length) if stage=='sft' else {k:encode_pair(tokenizer,item['prompt'],item[k],length) for k in ('chosen','rejected')}
+            count+=1
+            if count>=config['max_blocks']:return
+
+
 def run(config):
     import torch
     from transformers import PreTrainedTokenizerFast,set_seed
@@ -60,7 +84,9 @@ def run(config):
             'torch_version':torch.__version__}
     with torch.inference_mode():
         if config['mode']=='generate':
-            ids=tokenizer.encode(config['prompt'],add_special_tokens=False)
+            from server.posttraining import prompt_text
+            post=train.get('stage','pretrain')!='pretrain'
+            ids=tokenizer.encode(prompt_text(config['prompt'],tokenizer) if post else config['prompt'],add_special_tokens=False)
             if not ids or len(ids)+config['max_new_tokens']>length:
                 raise ValueError(f'提示词 tokens ({len(ids)}) + 新增 tokens ({config["max_new_tokens"]}) 超过训练上下文 ({length})，请缩短输入或生成长度')
             x=torch.tensor([ids],device=device)
@@ -71,7 +97,24 @@ def run(config):
             if device=='cuda':torch.cuda.synchronize()
             seconds=time.monotonic()-begin;new=out[0,len(ids):].tolist()
             result.update(prompt=config['prompt'],completion=tokenizer.decode(new,skip_special_tokens=True),prompt_tokens=len(ids),generated_tokens=len(new),generation_seconds=seconds,tokens_per_second=len(new)/seconds if seconds else None,
-                finish_reason='eos' if new and new[-1]==tokenizer.eos_token_id else 'length',note='基础语言模型续写；未进行指令微调，不代表聊天或推理能力。')
+                finish_reason='eos' if new and new[-1]==tokenizer.eos_token_id else 'length',note='使用训练时相同的指令模板进行单轮回答；质量需独立业务评测。' if post else '基础语言模型续写；未进行指令微调，不代表聊天或推理能力。')
+        elif train.get('stage','pretrain')!='pretrain':
+            from server.posttraining import collator,response_logps
+            paired=train['stage']=='dpo';total=0.;tokens=0;blocks=0;correct=0
+            for row in post_rows(config,tokenizer,length):
+                batch={k:v.to(device) for k,v in collator(tokenizer.pad_token_id,paired)([row]).items()}
+                labels=batch.pop('labels')
+                logps=response_logps(model(**batch,use_cache=False).logits,labels)
+                # SFT targets or DPO chosen targets only; never exponentiate DPO training loss.
+                count=int((labels[0,1:]!=-100).sum());total-=float(logps[0]);tokens+=count;blocks+=1
+                if paired:correct+=int(logps[0]>logps[1])
+            if not tokens:raise ValueError('没有可评估的回答 tokens')
+            loss=total/tokens;source=config.get('dataset_path') or config['validation_post_path']
+            result.update(loss=loss,perplexity=math.exp(loss) if loss<50 else None,evaluated_tokens=tokens,blocks=blocks,sequence_length=length,
+                source='selected_dataset' if config.get('dataset_path') else 'training_validation',dataset_sha256=digest(source),max_blocks=config['max_blocks'],
+                score_unit='examples',loss_scope='chosen_response' if paired else 'response',
+                preference_accuracy=correct/blocks if paired else None,
+                note='仅回答及 EOS 的 token 加权交叉熵；不是 DPO 训练损失。偏好命中率按回答总 log 概率比较，受长度影响，不代表人工胜率。' if paired else '仅回答及 EOS 参与评分，排除提示词与 padding。仅同语料、模板、分词器和样本范围可比较。')
         else:
             total=0.;tokens=0;blocks=0
             for ids in score_blocks(config,tokenizer,length):

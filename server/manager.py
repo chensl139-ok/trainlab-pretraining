@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from server.model_tests import ModelTestQueue,validate_result
 from server.architectures import parameter_estimate
+from server.posttraining import MODEL_FIELDS, model_fingerprint, inherited_config
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -66,6 +67,9 @@ class Manager(ModelTestQueue):
             if 'request_key' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN request_key TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS jobs_request_key ON jobs(request_key)')
+            db.execute('CREATE TABLE IF NOT EXISTS dataset_formats (id TEXT PRIMARY KEY, format TEXT NOT NULL)')
+        from server.model_registry import init_registry
+        init_registry(self)
         self.init_tests()
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS scheduler_control (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL, reason TEXT NOT NULL, updated_at TEXT NOT NULL, actor TEXT NOT NULL)')
@@ -228,6 +232,35 @@ class Manager(ModelTestQueue):
                 raise ValueError('任务队列已达上限，请等待任务完成')
             if shutil.disk_usage(self.root).free<self.min_free_bytes:
                 raise ValueError('可用磁盘低于安全水位，拒绝创建任务')
+            stage=config.get('stage','pretrain')
+            with self.db() as db:
+                fmt=db.execute('SELECT format FROM dataset_formats WHERE id=?',(config['dataset_id'],)).fetchone()
+            if (fmt['format'] if fmt else 'pretrain') != stage:
+                raise ValueError('数据格式与训练阶段不匹配，请选择对应的预训练、SFT 或 DPO 数据')
+            base_payload={}
+            if stage!='pretrain':
+                if config.get('base_model_id'):
+                    from server.model_registry import get_model
+                    imported=get_model(self,config['base_model_id'],principal.project if principal else None)
+                    base_path=Path(imported['path']);base_config=imported['config']
+                    if config['base_checkpoint']!='final':raise ValueError('导入模型只能使用 final 版本')
+                    expected_fingerprint=imported['fingerprint']
+                else:
+                    base_job=self.get(config.get('base_job_id'))
+                    if not base_job:raise ValueError('基础模型任务不存在')
+                    base_path=self.test_model_path(base_job,config['base_checkpoint']);base_config=base_job['config']
+                    expected_fingerprint=None
+                base_config=inherited_config(base_config)
+                for field in MODEL_FIELDS:
+                    if config.get(field,0)!=base_config.get(field,0):
+                        raise ValueError('后训练的模型结构与上下文必须继承基础模型：'+field)
+                base_payload={'base_model_path':str(base_path),'base_model_sha256':model_fingerprint(base_path)}
+                if expected_fingerprint and expected_fingerprint!=base_payload['base_model_sha256']:
+                    raise ValueError('导入模型文件摘要已改变，拒绝训练')
+                if resume_from:
+                    previous=json.loads((Path(resume_from).parents[1]/'config.json').read_text())
+                    if previous.get('base_model_sha256')!=base_payload['base_model_sha256']:
+                        raise ValueError('后训练基础模型已改变，不能恢复旧检查点')
             folder = self.jobdir(jid)
             folder.mkdir()
             # Model and data paths are chosen by the service, never by the client.
@@ -235,7 +268,7 @@ class Manager(ModelTestQueue):
                 ds = db.execute('SELECT * FROM datasets WHERE id=?', (config['dataset_id'],)).fetchone()
                 if not ds:
                     raise ValueError('数据集不存在')
-                payload = {**config, 'dataset_path': str(self.root/'datasets'/(ds['id']+'.jsonl')),
+                payload = {**config, **base_payload, 'dataset_path': str(self.root/'datasets'/(ds['id']+'.jsonl')),
                            'dataset_sha256': ds['sha256'], 'output_dir': str(folder/'output'),
                            'metrics_path': str(folder/'metrics.jsonl'), 'resume_from': resume_from}
                 (folder/'config.tmp').write_text(json.dumps(payload, ensure_ascii=False, indent=2))

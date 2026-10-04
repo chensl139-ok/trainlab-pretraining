@@ -22,6 +22,7 @@ from server.schema import TrainConfig, CatalogImport, ModelTestConfig, Scheduler
 from server.catalog import CATALOG, collect, CatalogError, MAX_OUTPUT
 from server.security import AuthStore, Principal
 from server.architectures import ARCHITECTURES
+from server.posttraining import record_format, MODEL_FIELDS, inherited_config
 
 MAX_UPLOAD = 100*1024*1024
 AUDIT_LOG = logging.getLogger('trainlab.audit')
@@ -212,7 +213,9 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                 rows=db.execute('SELECT * FROM datasets ORDER BY created_at DESC LIMIT 500')
             else:
                 rows=db.execute("SELECT d.* FROM datasets d JOIN resource_acl a ON a.kind='dataset' AND a.id=d.id WHERE a.project=? ORDER BY d.created_at DESC LIMIT 500",(p.project,))
-            return [dict(r) for r in rows]
+            items=[dict(r) for r in rows]
+            formats=dict(db.execute('SELECT id,format FROM dataset_formats').fetchall())
+            return [{**r,'format':formats.get(r['id'],'pretrain')} for r in items]
 
     @app.get('/api/datasets/{did}/preview')
     def preview_dataset(did: str, p=Depends(auth)):
@@ -235,8 +238,8 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                 if not line.strip():continue
                 try:
                     item=json.loads(line)
-                    text=item['text']
-                    if not isinstance(text,str):raise ValueError()
+                    kind=record_format(item)
+                    text=item['text'] if kind=='pretrain' else json.dumps(item,ensure_ascii=False,indent=2)
                 except (ValueError,KeyError,TypeError):
                     raise HTTPException(409,'语料文件已损坏，请检查备份')
                 samples.append({'text':text[:800],'truncated':len(text)>800})
@@ -335,6 +338,7 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                     await anyio.to_thread.run_sync(out.write,chunk)
             def validate_and_save():
                 rows = 0
+                kind = None
                 with temp.open('rb') as src:
                     while True:
                         line = src.readline(1024*1024+1)
@@ -345,16 +349,19 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
                         if not line.strip():
                             continue
                         item = json.loads(line.decode('utf-8'))
-                        if not isinstance(item,dict) or set(item)!={'text'} or not isinstance(item['text'],str) or not item['text'].strip():
-                            raise ValueError('每行必须是仅包含非空 text 字符串的 JSON 对象')
+                        current=record_format(item)
+                        if kind and kind!=current:raise ValueError('同一文件不能混合不同训练格式')
+                        kind=current
                         rows += 1
+                        if rows>100000:raise ValueError('最多 100000 条样本')
                 if rows < 20:
                     raise ValueError('至少需要 20 篇文档；每行一篇，请勿将同篇文档切成跨集合的行')
                 temp.replace(path)
                 with manager.db() as db:
                     db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)',(did,name,rows,size,sha.hexdigest(),now()))
                     identities.grant(p,'dataset',did,db)
-                return {'id':did,'name':name,'rows':rows,'bytes':size,'sha256':sha.hexdigest()}
+                    db.execute('INSERT INTO dataset_formats VALUES(?,?)',(did,kind))
+                return {'format':kind,'id':did,'name':name,'rows':rows,'bytes':size,'sha256':sha.hexdigest()}
             return await anyio.to_thread.run_sync(validate_and_save)
         except (ValueError,UnicodeError) as e:
             raise HTTPException(422,str(e))
@@ -373,6 +380,25 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     @app.post('/api/jobs')
     def create(config: TrainConfig, idempotency_key: str = Header(default=None), p=Depends(writer)):
         identities.require(p,'dataset',config.dataset_id)
+        if config.stage!='pretrain':
+            with manager.db() as db:
+                data_acl=db.execute("SELECT project FROM resource_acl WHERE kind='dataset' AND id=?",(config.dataset_id,)).fetchone()
+            if not data_acl or data_acl['project']!=p.project:
+                raise HTTPException(422,'后训练语料与新任务必须属于同一项目')
+            if config.base_model_id:
+                from server.model_registry import get_model
+                try:source_config=get_model(manager,config.base_model_id,p.project)['config']
+                except ValueError as exc:raise HTTPException(404,str(exc))
+            else:
+                source=job(config.base_job_id,p)
+                with manager.db() as db:
+                    base_acl=db.execute("SELECT project FROM resource_acl WHERE kind='job' AND id=?",(source['id'],)).fetchone()
+                if not base_acl or base_acl['project']!=p.project:
+                    raise HTTPException(422,'基础模型与后训练任务必须属于同一项目')
+                source_config=source['config']
+            config=TrainConfig(**{**config.model_dump(),'parameter_count':0,**inherited_config(source_config)})
+        else:
+            config=config.model_copy(update={'parameter_count':0})
         if idempotency_key and not re.fullmatch(r'[a-f0-9-]{32,36}', idempotency_key):
             raise HTTPException(422, '提交标识无效')
         available = {g['index'] for g in gpu_inventory()['gpus']}
@@ -388,6 +414,21 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     @app.get('/api/jobs')
     def jobs(p=Depends(auth)):
         return manager.list_jobs(None if p.role=='admin' else p.project)
+
+    @app.get('/api/base-models')
+    def base_models(p=Depends(auth)):
+        models=[]
+        with manager.db() as db:
+            for r in db.execute('SELECT * FROM base_models WHERE project=? ORDER BY name',(p.project,)):
+                models.append({'model_id':r['id'],'job_id':None,'name':r['name'],'checkpoint':'final','stage':'imported','revision':r['revision'],'config':json.loads(r['config'])})
+        for found in manager.list_jobs(p.project):
+            for name in ['final',*[x.name for x in reversed(manager.checkpoints(found['id']))]]:
+                try:manager.test_model_path(found,name)
+                except ValueError:continue
+                models.append({'job_id':found['id'],'name':found['config']['name'],'checkpoint':name,
+                    'stage':found['config'].get('stage','pretrain'),
+                    'config':inherited_config(found['config'])})
+        return models
 
     @app.get('/api/jobs/{jid}', dependencies=[Depends(auth)])
     def detail(jid: str, p=Depends(auth)):

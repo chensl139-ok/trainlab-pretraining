@@ -1,5 +1,14 @@
 # 验证记录
 
+## 后训练与 ModelScope 基座导入（2026-10-04）
+
+- 接入全参数 SFT 与标准 sigmoid DPO，基座可来自 ModelScope 本地导入或同项目的完整训练产物。数据类型自动校验，提示词分组划分训练/验证；仅回答及 EOS 参与损失，超长样本明确拒绝。DPO 保持冻结参考模型且不将偏好损失换算为困惑度。
+- 52 项 pytest、16 项 Node 测试、JavaScript 语法和 pip check 通过。覆盖角色/项目隔离、基础模型唯一绑定、文件摘要改变拒绝、数据格式错配、模板/损失掩码、DPO 梯度方向，以及包含导入模型的备份恢复、导入锁与备份互斥。
+- 真实离线 CPU 小型 Qwen3 完成预训练 → SFT 10 步 → DPO 10 步。两个后训练阶段分别从 checkpoint-5 恢复，最终权重逐项相同；权重确实更新且基础模型摘要保持不变。使用实际 safetensors 小模型验证注册导入路径，测试产物明确标注本地 fixture，不冒充官方 ModelScope 权重。
+- 浏览器实际提交 DPO 结果的指令回答与两样本评估；回答 CE 5.8421、PPL 344.49、偏好命中率 100%，仅为小样本链路证据，绝非质量基准。模板自动应用、SFT/DPO 数据过滤、基础结构锁定、390px 无横向溢出、刷新会话恢复与控制台无 error 均已检查。
+- 从 ModelScope 实际读取 Qwen3-0.6B-Base config，确认原生 head_dim=128、hidden_size=1024、16 个头、151936 词表，导入后保留原始配置，不按缩小模型公式重建。未在本机下载/训练完整官方 0.6B/1.7B 权重；目标 RTX PRO 6000 的显存、BF16、8 卡 DDP 与长时稳定性仍需服务器验收。
+- ModelScope 下载及容器导入命令、数据格式和指标定义见 [POSTTRAINING.md](POSTTRAINING.md)。PPO/GRPO、LoRA/QLoRA 和多轮 messages 不在本次支持范围。
+
 ## 模型测试页布局与交互（2026-10-04）
 
 - 已发布并匿名验证 Linux amd64 镜像 `ghcr.io/chensl139-ok/trainlab-pretraining:latest`，源码提交 `69adaeefa80337c24f6442afc0a8d42f652d5a0a`，固定摘要 `sha256:7e79e29a889877e7d4ade40172c4121fa6ebf2d3cc23016a691cb28af328fffe`。[GitHub Actions](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37210406403) 的容器内 CPU 训练/恢复、生产 API 和只读文件系统检查均通过。
