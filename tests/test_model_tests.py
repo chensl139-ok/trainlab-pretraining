@@ -116,3 +116,67 @@ def test_invalid_test_result_is_rejected():
     config={'mode':'score','checkpoint':'final'}
     for result in ([],{}, {'mode':'score','checkpoint':'final'}, {'mode':'score','checkpoint':'final','loss':float('nan'),'blocks':1,'sequence_length':64,'evaluated_tokens':63}):
         with pytest.raises(ValueError):validate_result(result,config)
+
+
+def test_test_details_logs_progress_queue_and_acl(system):
+    c,k=system;jid=completed(c,k);m=c.app.state.manager;url=f'/api/jobs/{jid}/tests'
+    a=c.post(url,json={'prompt':'one'},headers=k['alice']).json()
+    b=c.post(url,json={'prompt':'two'},headers=k['alice']).json()
+    assert m.get_test(b['id'])['queue_ahead']==1
+    folder=m.testdir(a['id'])
+    (folder/'progress.json').write_text('{"phase":"scoring","completed":1,"total":2}')
+    (folder/'test.log').write_text('x'*40000+'diagnostic tail')
+    endpoint=url+'/'+a['id']
+    assert c.get(endpoint,headers=k['bob']).status_code==404
+    view=c.get(endpoint,headers=k['viewer']).json()
+    assert view['progress']['completed']==1 and view['log'].endswith('diagnostic tail') and len(view['log'])<=32768
+    assert c.get(url+'/'+'a'*32,headers=k['alice']).status_code==404
+    other=create(c,k['alice'],upload(c,k['alice']),'e'*32).json()['id']
+    assert c.get(f'/api/jobs/{other}/tests/'+a['id'],headers=k['alice']).status_code==404
+    (folder/'progress.json').write_text('{partial')
+    assert c.get(endpoint,headers=k['alice']).json()['progress'] is None
+    c.post(endpoint+'/cancel',headers=k['alice'])
+    assert m.get_test(b['id'])['queue_ahead']==0
+
+
+def test_missing_validation_rejected_before_queue_and_cpu_counts_nested_weights(system):
+    c,k=system;jid=completed(c,k);m=c.app.state.manager;url=f'/api/jobs/{jid}/tests'
+    assert c.post(url,json={'mode':'score'},headers=k['alice']).status_code==422
+    assert m.list_tests(jid)==[]
+    validation=m.jobdir(jid)/'output'/'prepared'/'validation.bin';validation.parent.mkdir()
+    validation.write_bytes(b'bad')
+    assert c.post(url,json={'mode':'score'},headers=k['alice']).status_code==422
+    validation.write_bytes(b'\x00'*m.get(jid)['config']['seq_length']*4)
+    assert c.post(url,json={'mode':'score'},headers=k['alice']).status_code==200
+    weights=m.jobdir(jid)/'output'/'final'/'nested'/'weights.safetensors';weights.parent.mkdir()
+    with weights.open('wb') as f:f.truncate(401*1024**2)
+    info=c.get('/api/jobs/'+jid,headers=k['alice']).json()['test_model_info']['final']
+    assert info['cpu_supported'] is False
+    assert c.post(url,json={'prompt':'test'},headers=k['alice']).status_code==422
+
+
+def test_generation_budget_includes_posttraining_template():
+    from server.evaluate import generation_ids
+    class Tokenizer:
+        chat_template=None
+        def encode(self,text,**kwargs):return list(text.encode())
+    c={'prompt':'abc','max_new_tokens':4,'train_config':{'stage':'pretrain','seq_length':8}}
+    assert len(generation_ids(c,Tokenizer()))==3
+    c['train_config']['stage']='sft'
+    with pytest.raises(ValueError,match='含模板'):generation_ids(c,Tokenizer())
+    c['train_config']['seq_length']=128
+    assert len(generation_ids(c,Tokenizer()))>3
+
+
+def test_result_request_bounds_and_preference_accuracy():
+    from server.model_tests import validate_result
+    c={'mode':'generate','checkpoint':'final','prompt':'original','max_new_tokens':4}
+    r={'mode':'generate','checkpoint':'final','prompt':'original','completion':'a','prompt_tokens':2,'generated_tokens':4,'generation_seconds':.1}
+    assert validate_result(r,c)==r
+    for patch in ({'prompt':'wrong'},{'generated_tokens':5},{'generated_tokens':1.5},{'prompt_tokens':0}):
+        with pytest.raises(ValueError):validate_result(r|patch,c)
+    c={'mode':'score','checkpoint':'final','max_blocks':1}
+    r={'mode':'score','checkpoint':'final','loss':2.,'blocks':1,'sequence_length':64,'evaluated_tokens':63,'preference_accuracy':1.}
+    assert validate_result(r,c)==r
+    for patch in ({'blocks':2},{'blocks':1.5},{'preference_accuracy':float('nan')},{'preference_accuracy':2}):
+        with pytest.raises(ValueError):validate_result(r|patch,c)

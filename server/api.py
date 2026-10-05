@@ -436,9 +436,12 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
         folder = manager.jobdir(jid)
         found['checkpoints'] = [p.name for p in manager.checkpoints(jid)]
         found['testable_models']=[]
+        found['test_model_info']={}
         for name in ['final',*reversed(found['checkpoints'])]:
             try:
-                manager.test_model_path(found,name)
+                model_path=manager.test_model_path(found,name)
+                weight_bytes=sum(f.stat().st_size for f in model_path.rglob('*.safetensors'))
+                found['test_model_info'][name]={'weight_bytes':weight_bytes,'cpu_supported':weight_bytes<=400*1024**2}
                 found['testable_models'].append(name)
             except ValueError:pass
         found['metrics'] = []
@@ -479,6 +482,19 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     def model_tests(jid: str, p=Depends(auth)):
         job(jid,p)
         return manager.list_tests(jid)
+
+    @app.get('/api/jobs/{jid}/tests/{tid}')
+    def model_test_detail(jid: str, tid: str, p=Depends(auth)):
+        job(jid,p)
+        found=manager.get_test(tid)
+        if not found or found['job_id']!=jid:raise HTTPException(404,'测试不存在')
+        path=manager.testdir(tid)/'test.log'
+        found['log']=''
+        if path.is_file() and not path.is_symlink():
+            with path.open('rb') as f:
+                f.seek(max(0,path.stat().st_size-32*1024))
+                found['log']=f.read().decode('utf-8',errors='replace')
+        return found
 
     @app.post('/api/jobs/{jid}/tests/{tid}/cancel')
     def cancel_model_test(jid: str, tid: str, p=Depends(writer)):

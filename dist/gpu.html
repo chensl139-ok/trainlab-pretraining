@@ -61,7 +61,7 @@
 <div class="test-heading"><h3>模型测试</h3><p>选择模型版本，运行续写或语料评估。</p></div>
 <p id="test-availability" class="test-model-context"></p>
 <form id="model-test-form">
-<fieldset class="test-section"><legend><span>1</span> 选择模型</legend><div class="test-grid"><label class="field"><span>模型版本</span><select id="test-checkpoint"></select></label><label class="field"><span>运行设备</span><select id="test-device"><option value="cpu">CPU · 小模型测试</option></select></label></div></fieldset>
+<fieldset class="test-section"><legend><span>1</span> 选择模型</legend><div class="test-grid"><label class="field"><span>模型版本</span><select id="test-checkpoint"></select></label><label class="field"><span>运行设备</span><select id="test-device"><option value="cpu">CPU · 小模型测试</option></select></label></div><p id="test-device-hint" class="mini-note"></p></fieldset>
 <fieldset class="test-section"><legend><span>2</span> 配置测试</legend>
 <input id="test-mode" type="hidden" value="generate">
 <div class="test-mode-options" role="group" aria-label="测试方式"><label><input type="radio" name="test-mode-choice" value="generate" checked><span><strong id="test-generate-label">文本续写</strong><small>查看模型实际输出</small></span></label><label><input type="radio" name="test-mode-choice" value="score"><span><strong>语料评估</strong><small>计算 Loss 与困惑度</small></span></label></div>
@@ -72,7 +72,7 @@
 <div class="test-submit-row"><button id="submit-test" class="button primary" type="submit">运行续写测试</button><p class="mini-note">与训练共用队列。关闭页面后继续运行。</p></div>
 <p id="test-submit-state" class="mini-note" role="status"></p>
 </form>
-<section class="test-output" aria-label="测试结果"><h3>测试结果</h3><div id="test-result-empty" class="test-result-empty">提交测试后在这里查看结果，也可以从历史记录选择一次测试。</div><div id="test-result" class="test-result" tabindex="-1" hidden></div></section>
+<section class="test-output" aria-label="测试结果"><div class="test-history-head"><h3>测试结果</h3><button id="refresh-current-test" class="text-button" type="button">刷新结果</button></div><div id="test-result-empty" class="test-result-empty">提交测试后在这里查看结果，也可以从历史记录选择一次测试。</div><div id="test-result" class="test-result" tabindex="-1" hidden></div></section>
 <details class="test-history-section"><summary>历史测试 <span id="test-history-count">0 条</span></summary><div class="test-history-head"><span class="mini-note">最近 30 条 · 点击查看结果</span><button id="refresh-tests" class="text-button">刷新记录</button></div><div id="test-history" class="test-history"><div class="empty">尚未运行模型测试</div></div></details>
 </section>
 <section id="tab-logs" role="tabpanel" aria-labelledby="tab-button-logs" hidden><div class="log-toolbar"><label><input id="follow-log" type="checkbox" checked> 跟随最新日志</label><button id="download-log" class="text-button">下载日志片段</button></div><pre id="job-log" class="job-log" tabindex="0"></pre><p class="metric-label">页面显示最后 128 KiB；完整日志保留在服务器。</p></section>

@@ -19,11 +19,16 @@ def validate_result(result,config):
         if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:
             raise ValueError('测试结果字段无效：'+name)
     if config['mode']=='generate':
+        if not isinstance(result.get('generated_tokens'),int) or not isinstance(result.get('prompt_tokens'),int) or result['prompt_tokens']<1 or result['generated_tokens']>config.get('max_new_tokens',256):raise ValueError('生成 token 数超出请求范围')
+        if result.get('prompt')!=config.get('prompt'):raise ValueError('结果提示词与请求不匹配')
         if not all(isinstance(result.get(key),str) for key in ('prompt','completion')):raise ValueError('缺少续写文本')
         rate=result.get('tokens_per_second')
         if rate is not None and (isinstance(rate,bool) or not isinstance(rate,(int,float)) or not math.isfinite(rate) or rate<0):raise ValueError('生成速率无效')
     else:
         if not all(result.get(key,0)>0 for key in ('evaluated_tokens','blocks','sequence_length')):raise ValueError('评估 token 数无效')
+        if any(not isinstance(result[k],int) for k in ('evaluated_tokens','blocks','sequence_length')) or result['blocks']>config.get('max_blocks',128):raise ValueError('评估样本数量超出请求范围')
+        accuracy=result.get('preference_accuracy')
+        if accuracy is not None and (isinstance(accuracy,bool) or not isinstance(accuracy,(int,float)) or not math.isfinite(accuracy) or not 0<=accuracy<=1):raise ValueError('偏好命中率无效')
         ppl=result.get('perplexity')
         if ppl is not None and (isinstance(ppl,bool) or not isinstance(ppl,(int,float)) or not math.isfinite(ppl) or ppl<1):raise ValueError('困惑度无效')
     return result
@@ -43,11 +48,22 @@ class ModelTestQueue:
 
     def decode_test(self,row):
         out=self.decode(row);out['result']=json.loads(out['result']) if out['result'] else None
+        out['progress']=None
+        progress=self.testdir(out['id'])/'progress.json'
+        if progress.is_file() and not progress.is_symlink() and progress.stat().st_size<=4096:
+            try:
+                value=json.loads(progress.read_text())
+                if isinstance(value,dict):out['progress']=value
+            except (OSError,ValueError):pass
+        if out['status']=='queued':
+            with self.db() as db:
+                ahead=db.execute("SELECT COUNT(*) FROM (SELECT created_at,status FROM jobs UNION ALL SELECT created_at,status FROM model_tests) WHERE status IN ('running','cancelling') OR (status='queued' AND created_at<?)",(out['created_at'],)).fetchone()[0]
+            out['queue_ahead']=ahead
         return out
 
     def list_tests(self,jid):
         with self.db() as db:
-            return [self.decode_test(row) for row in db.execute('SELECT * FROM model_tests WHERE job_id=? ORDER BY created_at DESC LIMIT 30',(jid,))]
+            return [self.decode_test(row) for row in db.execute('SELECT * FROM model_tests WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT 30',(jid,))]
 
     def test_model_path(self,job,checkpoint):
         if job['status'] in ACTIVE:raise ValueError('请等待训练停止后再测试，避免与检查点写入或清理冲突')
@@ -82,13 +98,19 @@ class ModelTestQueue:
             if pending>=self.max_pending:raise ValueError('任务队列已达上限，请等待完成')
             if shutil.disk_usage(self.root).free<self.min_free_bytes:raise ValueError('可用磁盘低于安全水位')
             if config['device']=='cpu':
-                size=sum(f.stat().st_size for f in path.glob('*.safetensors'))
+                size=sum(f.stat().st_size for f in path.rglob('*.safetensors'))
                 if size>400*1024**2:raise ValueError('CPU 测试仅支持权重不超过 400 MiB 的小模型；请选择 GPU')
             train_config=json.loads((self.jobdir(jid)/'config.json').read_text())
             if config.get('dataset_id'):
                 if not ds:raise ValueError('评估语料不存在')
                 if (fmt['format'] if fmt else 'pretrain')!=train_config.get('stage','pretrain'):raise ValueError('评估语料格式必须与任务阶段一致')
                 if ds['sha256']==train_config.get('dataset_sha256'):raise ValueError('另选评估语料不能与训练语料相同；可选择已有验证集')
+            if config['mode']=='score' and not ds:
+                validation=self.jobdir(jid)/'output'/'prepared'/('validation.jsonl' if train_config.get('stage','pretrain')!='pretrain' else 'validation.bin')
+                if not validation.is_file() or validation.is_symlink() or not validation.stat().st_size:
+                    raise ValueError('原验证集缺失或为空，请选择另一份评估语料')
+                if train_config.get('stage','pretrain')=='pretrain' and (validation.stat().st_size%4 or validation.stat().st_size<train_config['seq_length']*4):
+                    raise ValueError('原验证集损坏或不足一个上下文块，请选择另一份评估语料')
             tid=uuid.uuid4().hex;folder=self.testdir(tid);folder.mkdir()
             payload={**config,'train_config':train_config,'model_path':str(path),'validation_path':str(self.jobdir(jid)/'output'/'prepared'/'validation.bin'),
                 'validation_post_path':str(self.jobdir(jid)/'output'/'prepared'/'validation.jsonl'),

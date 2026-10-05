@@ -8,7 +8,7 @@ function browser(fetch,storageFailure=false){
   const document={querySelector(selector){if(!elements.has(selector))elements.set(selector,{disabled:false,value:'',dataset:{},hidden:false,close(){},replaceChildren(){},classList:{add(){},remove(){}}});return elements.get(selector);},querySelectorAll(){return [];}};
   const context=vm.createContext({document,window:{TrainLabUI:{}},fetch,AbortController,AbortSignal,setTimeout:()=>0,clearTimeout(){},sessionStorage:{getItem:k=>store.get(k),setItem(k,v){if(storageFailure)throw new Error('Storage denied');store.set(k,v);},removeItem:k=>store.delete(k)}});
   const source=fs.readFileSync('dist/gpu.js','utf8').split('\nfunction paintSystem')[0];
-  vm.runInContext(source+'\nfunction paintSystem(){}\nasync function refresh(){}',context);
+  vm.runInContext(source+'\nfunction paintSystem(){}\nasync function refresh(){}\nfunction changeTab(){}',context);
   return {store,elements,run:code=>vm.runInContext(code,context)};
 }
 const response=(status=200)=>({status,ok:status===200,json:async()=>({identity:{subject:'test'}}),headers:{get:()=>null}});
@@ -26,4 +26,12 @@ test('late authentication response cannot reconnect after logout',async()=>{
 });
 test('blocked browser storage still permits login with an explicit fallback notice',async()=>{
  const b=browser(async()=>response(),true);await b.run("connect('memory-only')");assert.equal(b.run('connected'),true);assert.equal(b.store.size,0);assert.match(b.elements.get('#toast').textContent,/浏览器禁止会话存储/);
+});
+
+test('test view survives reload, is isolated by identity, and clears on logout',async()=>{
+ const b=browser(async()=>response());await b.run("connect('credential')");
+ b.run("selectedJob='a'.repeat(32);selectedTest='b'.repeat(32);activeTab='testing';saveView();selectedJob=null;selectedTest=null;activeTab='metrics';restoreView({subject:'test'})");
+ assert.equal(b.run('selectedJob'),'a'.repeat(32));assert.equal(b.run('activeTab'),'testing');assert.equal(b.run('restoredTest.id'),'b'.repeat(32));
+ b.run("selectedJob=null;restoreView({subject:'another-user'})");assert.equal(b.run('selectedJob'),null);
+ b.run("restoreView({subject:'test'});disconnected()");assert.equal(b.store.size,0);
 });
