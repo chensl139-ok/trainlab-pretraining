@@ -2,6 +2,7 @@
 
 ## 个人免凭据模式（2026-10-08）
 
+- Linux amd64 镜像已成功发布并匿名核对源码版本：`ghcr.io/chensl139-ok/trainlab-pretraining:latest`，源码 `c4b18b35f11c45bb66365908e91349290e52f2fa`，固定摘要 `sha256:91fbda8a1b785b58a30fc13cd075e24d1d88a6d203ecca498635114ee8006937`。[GitHub Actions 成功记录](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37731786618)。CI API 环境 59 项 pytest 通过、1 项 torch 数学检查跳过，21 项 Node 通过；实际镜像通过三种架构的 CPU 训练/恢复/生成/评分、Qwen3 SFT/DPO、只读根文件系统下的凭据模式，以及个人免凭据读写与错误 Host/Origin 拒绝检查。
 - 两套 Compose 默认 `TRAINLAB_AUTH_MODE=local`，绑定地址保持 `127.0.0.1`。直接运行 Python API 默认仍为 credentials 模式以兼容既有调用方。个人模式映射为 `local-owner` / admin / research，可读取旧项目数据与任务，所有操作仍保留审计，不签发或向浏览器保存隐藏令牌。
 - 自动连接、刷新后恢复视图、旧浏览器凭据移除，以及不发送空 Bearer 均已接通；凭据模式继续支持原个人令牌、角色、项目、有效期和吊销检查。公网域名发布须显式切回 credentials，默认个人模式只接受 localhost 或指定的本机/私有 IP Host 与私有网络来源。
 - 60 项 pytest + 21 项 Node 测试、前端语法和 pip check 通过，覆盖个人模式读写与旧项目访问、Docker bridge 来源、跨站 Origin/Fetch Metadata、端口错配、Host 拦截、转发头不能绕过公网来源拒绝、无效配置启动失败，以及浏览器存储受限时自动连接。
