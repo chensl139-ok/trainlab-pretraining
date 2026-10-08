@@ -189,3 +189,57 @@ def test_preview_is_bounded_and_project_scoped(system):
     assert c.get('/api/datasets/invalid/preview',headers=k['admin']).status_code==404
     (c.app.state.manager.root/'datasets'/(did+'.jsonl')).unlink()
     assert c.get('/api/datasets/'+did+'/preview',headers=k['alice']).status_code==409
+
+
+def test_local_owner_reads_existing_projects_and_writes_without_credentials(tmp_path,monkeypatch):
+    monkeypatch.setenv('TRAINLAB_ENV','production');monkeypatch.setenv('TRAINLAB_AUTH_MODE','local');monkeypatch.delenv('TRAINLAB_API_TOKEN',raising=False)
+    app=create_app(tmp_path,start_scheduler=False)
+    with TestClient(app,base_url='http://localhost:8000',client=('127.0.0.1',41234)) as c:
+        assert c.get('/api/health').json()['auth_required'] is False
+        assert c.get('/api/me').json()=={'subject':'local-owner','role':'admin','project':'research'}
+        did=upload(c,{})
+        assert c.get('/api/datasets').json()[0]['id']==did
+        assert c.post('/api/scheduler/control',json={'paused':True,'reason':'local mode check'}).status_code==200
+        assert c.get('/api/audit').json()[0]['actor']=='local-owner'
+        with app.state.manager.db() as db:db.execute("UPDATE resource_acl SET project='old-project' WHERE id=?",(did,))
+        assert c.get('/api/datasets/'+did+'/preview').status_code==200
+        assert c.get('/api/me',headers={'Authorization':'Bearer revoked-old-key'}).status_code==200
+
+
+def test_local_mode_rejects_remote_hosts_origins_and_forwarded_spoofing(tmp_path,monkeypatch):
+    monkeypatch.setenv('TRAINLAB_AUTH_MODE','local');monkeypatch.delenv('TRAINLAB_API_TOKEN',raising=False)
+    app=create_app(tmp_path,start_scheduler=False)
+    with TestClient(app,base_url='http://localhost:8000',client=('172.18.0.1',41234)) as c:
+        assert c.get('/api/me').status_code==200  # Docker bridge to loopback-published port.
+        for headers in ({'Host':'attacker.example:8000'},{'Origin':'https://attacker.example'},{'Sec-Fetch-Site':'cross-site'},{'Origin':'http://localhost:9999'},{'Origin':'null'},{'Origin':'http://evil@localhost:8000'},{'Origin':'http://localhost:8000/api/me'}):
+            assert c.get('/api/me',headers=headers).status_code==403
+            assert c.post('/api/scheduler/control',json={'paused':True},headers=headers).status_code==403
+        assert c.post('/api/scheduler/control',json={'paused':True},headers={'Origin':'http://localhost:8000','Sec-Fetch-Site':'same-origin'}).status_code==200
+    with TestClient(app,base_url='http://localhost:8000',client=('8.8.8.8',41234)) as c:
+        assert c.get('/api/me',headers={'X-Forwarded-For':'127.0.0.1','X-Forwarded-Host':'localhost','Forwarded':'for=127.0.0.1;host=localhost'}).status_code==403
+
+
+def test_configured_private_entry_and_explicit_credentials_fallback(tmp_path,monkeypatch):
+    monkeypatch.setenv('TRAINLAB_AUTH_MODE','local');monkeypatch.setenv('TRAINLAB_LOCAL_HOSTS','localhost,192.168.10.20')
+    app=create_app(tmp_path,start_scheduler=False)
+    with TestClient(app,base_url='http://192.168.10.20:8000',client=('192.168.10.21',41234)) as c:
+        assert c.get('/api/me').status_code==200
+    monkeypatch.setenv('TRAINLAB_AUTH_MODE','credentials')
+    app=create_app(tmp_path,start_scheduler=False)
+    with TestClient(app,base_url='http://localhost:8000',client=('127.0.0.1',41234)) as c:
+        assert c.get('/api/health').json()['auth_required'] is True
+        assert c.get('/api/me').status_code==401
+        _,raw=app.state.identities.issue('admin','admin','research')
+        assert c.get('/api/me',headers={'Authorization':'Bearer '+raw}).status_code==200
+
+
+def test_invalid_local_configuration_fails_closed(tmp_path,monkeypatch):
+    monkeypatch.setenv('TRAINLAB_AUTH_MODE','unknown')
+    with pytest.raises(RuntimeError):create_app(tmp_path,start_scheduler=False)
+    monkeypatch.setenv('TRAINLAB_AUTH_MODE','local');monkeypatch.setenv('TRAINLAB_LOCAL_HOSTS','*')
+    with pytest.raises(ValueError):create_app(tmp_path,start_scheduler=False)
+    for host in ('8.8.8.8','public.example'):
+        monkeypatch.setenv('TRAINLAB_LOCAL_HOSTS',host)
+        with pytest.raises(ValueError):create_app(tmp_path,start_scheduler=False)
+    monkeypatch.setenv('TRAINLAB_LOCAL_HOSTS','localhost');monkeypatch.setenv('TRAINLAB_LOCAL_NETWORKS','0.0.0.0/0')
+    with pytest.raises(ValueError):create_app(tmp_path,start_scheduler=False)

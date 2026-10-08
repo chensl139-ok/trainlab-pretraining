@@ -1,5 +1,13 @@
 # 验证记录
 
+## 个人免凭据模式（2026-10-08）
+
+- 两套 Compose 默认 `TRAINLAB_AUTH_MODE=local`，绑定地址保持 `127.0.0.1`。直接运行 Python API 默认仍为 credentials 模式以兼容既有调用方。个人模式映射为 `local-owner` / admin / research，可读取旧项目数据与任务，所有操作仍保留审计，不签发或向浏览器保存隐藏令牌。
+- 自动连接、刷新后恢复视图、旧浏览器凭据移除，以及不发送空 Bearer 均已接通；凭据模式继续支持原个人令牌、角色、项目、有效期和吊销检查。公网域名发布须显式切回 credentials，默认个人模式只接受 localhost 或指定的本机/私有 IP Host 与私有网络来源。
+- 60 项 pytest + 21 项 Node 测试、前端语法和 pip check 通过，覆盖个人模式读写与旧项目访问、Docker bridge 来源、跨站 Origin/Fetch Metadata、端口错配、Host 拦截、转发头不能绕过公网来源拒绝、无效配置启动失败，以及浏览器存储受限时自动连接。
+- 浏览器未输入任何凭据即进入工作台，实际提交已有 DPO CPU 小模型的两样本评估并成功完成；刷新后同一测试 56bcef98、模型结果与 tab 恢复，旧 7 个训练任务和 10 份语料可见。CE 5.8421 / PPL 344.49 仅为流程证据，不代表模型质量。当前本地预览仍无 GPU；目标机器与真实网络隔离须在部署时验收。
+
+
 ## 模型测试可用性（2026-10-05）
 
 - Linux amd64 镜像已成功发布并匿名验证：`ghcr.io/chensl139-ok/trainlab-pretraining:latest`，源码 `7e146b13c7786a077ab2145993424fb96756d52e`，固定摘要 `sha256:120c50205a9317003b5e8c62f060d0a9a3e8336f7318e9387ec82525bef159ce`。[GitHub Actions 成功记录](https://github.com/chensl139-ok/trainlab-pretraining/actions/runs/37251451515)。CI API 环境 55 项 pytest 通过、1 项 torch 数学检查跳过，19 项 Node 通过；实际镜像通过三种架构训练/恢复、生成与评分、Qwen3 SFT/DPO 以及生产 API 只读文件系统检查。

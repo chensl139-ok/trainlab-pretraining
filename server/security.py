@@ -4,6 +4,8 @@ import hmac
 import secrets
 import re
 import time
+import ipaddress
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from fastapi import HTTPException
 
@@ -63,3 +65,38 @@ class AuthStore:
         else:
             with self.manager.db() as conn:
                 self.grant(p,kind,rid,conn)
+
+
+class LocalAccess:
+    """Single-owner access through explicit local hosts; no browser credentials."""
+    def __init__(self, hosts='localhost,127.0.0.1,::1', networks='127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'):
+        self.hosts={h.strip().lower() for h in hosts.split(',') if h.strip()}
+        if not self.hosts or any(h=='*' or '/' in h or '@' in h or not re.fullmatch(r'[a-z0-9.:-]+',h) for h in self.hosts):
+            raise ValueError('TRAINLAB_LOCAL_HOSTS 必须是 localhost 或明确的本机/私有 IP，不能使用通配符或 URL')
+        for host in self.hosts:
+            if host=='localhost':continue
+            try:address=ipaddress.ip_address(host)
+            except ValueError:raise ValueError('个人模式仅支持 localhost 或本机/私有 IP；域名发布请使用 credentials 模式')
+            if not address.is_private:raise ValueError('个人模式不允许公网 IP；请使用 SSH 隧道或 credentials 模式')
+        self.networks=[ipaddress.ip_network(n.strip()) for n in networks.split(',') if n.strip()]
+        if not self.networks or any(n.prefixlen==0 or not n.is_private for n in self.networks):
+            raise ValueError('TRAINLAB_LOCAL_NETWORKS 仅支持明确的本机或私有网段')
+
+    def require(self,request):
+        try:peer=ipaddress.ip_address(request.client.host)
+        except (ValueError,AttributeError):raise HTTPException(403,'无法确认访问来源，请通过本机或 SSH 隧道访问')
+        if not any(peer in network for network in self.networks) or request.url.hostname.lower() not in self.hosts or len(request.headers.getlist('host'))!=1:
+            raise HTTPException(403,'免凭据个人模式仅允许本机或配置的内网入口；请通过 SSH 隧道打开 localhost，或配置允许的内网主机')
+        if request.headers.get('sec-fetch-site','') not in ('','none','same-origin'):
+            raise HTTPException(403,'免凭据模式不允许其他网站发起访问')
+        origins=request.headers.getlist('origin')
+        if origins:
+            def origin_parts(value):
+                parsed=urlsplit(value)
+                if parsed.scheme not in ('http','https') or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment:raise ValueError('invalid origin')
+                return (parsed.scheme,parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80))
+            try:
+                if len(origins)!=1 or origin_parts(origins[0])!=(request.url.scheme,request.url.hostname,request.url.port or (443 if request.url.scheme=='https' else 80)):
+                    raise HTTPException(403,'免凭据模式仅允许同源请求')
+            except ValueError:raise HTTPException(403,'请求来源无效')
+        return Principal('local-owner','admin','research','local')

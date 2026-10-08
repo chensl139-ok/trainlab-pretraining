@@ -9,7 +9,7 @@
 - EOS 连接文档，连续定长打包，丢弃末尾不足一段的 token；相邻文档之间没有额外 attention 隔离。
 - 1 至 8 张 GPU 的单机 DDP、BF16/FP32、梯度累积、激活检查点、AdamW 和 cosine 调度。
 - 串行持久任务队列；训练日志、loss、验证 perplexity、模型文件下载；完整检查点恢复。
-- 个人 API 凭据、admin/operator/viewer 三角色、项目级 API 权限、凭据过期与吊销、请求审计。第一阶段仅供本人使用，权限模型为未来可信团队协作保留；尚无 SSO、进程/文件系统租户隔离或高可用。
+- 默认个人免凭据模式：本机 / SSH 隧道自动进入、明确 Host 与私有网段来源校验、同源请求与操作审计。可选个人 API 凭据模式提供 admin/operator/viewer 三角色、项目级 API 权限、凭据过期与吊销。第一阶段仅供本人使用，权限模型为未来可信团队协作保留；尚无 SSO、进程/文件系统租户隔离或高可用。
 - 提供任务内续写与 Loss/PPL 测试 API；不包含对外在线推理服务。训练产物是 Hugging Face 模型与分词器目录；对外推理服务需单独部署。
 - 不是海量语料预训练集群：尚无流式/分片语料、对象存储、FSDP/ZeRO、跨节点训练、业务基准评测流水线与对外模型服务。
 
@@ -42,7 +42,9 @@ docker compose build
 
 脚本仅首次生成 `.env`，不会覆盖已有配置。升级旧版本时，手动移除 `.env` 中的 `TRAINLAB_API_TOKEN`；生产模式检测到共享令牌会拒绝启动。历史无项目归属的任务/数据仅管理员可见，其他用户需重新上传并提交。
 
-首次签发管理员凭据（30 天有效）；原文只写入指定的 0600 文件，命令输出不会显示令牌：
+默认 Compose 为个人免凭据模式（`TRAINLAB_AUTH_MODE=local`），不需要签发凭据，直接继续启动服务。端口保持 `127.0.0.1`，通过本机或 SSH 隧道访问。
+
+以下为**可选的凭据模式**：仅在 `.env` 设置 `TRAINLAB_AUTH_MODE=credentials`、需要公网域名访问或独立用户权限时使用。首次签发管理员凭据（30 天有效），原文只写入指定的 0600 文件：
 
 ```bash
 docker compose run --rm trainlab python -m scripts.users issue --subject admin --project research --role admin --days 30 --credential-file /state/credentials/admin.key
@@ -85,7 +87,7 @@ docker compose logs --tail=100 trainlab
 ssh -N -L 8000:127.0.0.1:8000 your-user@your-server
 ```
 
-浏览器打开 `http://127.0.0.1:8000/gpu.html`，输入分配给本人的个人凭据。浏览器只请求同源 API，凭据保存在当前标签页的 sessionStorage，刷新或同标签页导航返回会重新验证并恢复登录；断开连接或 API 返回 401 时清除。浏览器禁止会话存储时会提示退回仅本次页面连接。现有 chatgpt.site 地址只提供界面预览，不代理访问你的服务器。
+浏览器打开 `http://127.0.0.1:8000/gpu.html`，个人免凭据模式会自动进入工作台并恢复当前视图，刷新不需要登录。旧浏览器凭据会移除。可选凭据模式才显示登录表单：凭据保存在当前标签页 sessionStorage，刷新或返回后验证并恢复登录；断开连接或 401 时清除。凭据模式下浏览器禁止会话存储时会提示退回仅本次页面连接。现有 chatgpt.site 地址只提供界面预览，不代理访问你的服务器。
 
 如需局域网直连，可在 `.env` 将 `TRAINLAB_BIND` 改为机器的内网 IP，并配置访问范围；令牌不应通过不可信的明文网络传输。团队/公网访问建议使用下节 HTTPS 入口。
 
@@ -95,6 +97,7 @@ ssh -N -L 8000:127.0.0.1:8000 your-user@your-server
 
 ```text
 TRAINLAB_DOMAIN=trainlab.example.com
+TRAINLAB_AUTH_MODE=credentials
 ```
 
 将上面的示例替换为你自己的域名，然后运行：
@@ -103,7 +106,7 @@ TRAINLAB_DOMAIN=trainlab.example.com
 docker compose -f compose.yaml -f deploy/compose.https.yaml up -d --build
 ```
 
-Caddy 负责 TLS 和反向代理。训练 API 仍要求令牌，8000 默认保持 loopback 绑定。该方式发布的是训练控制台，不是已训练模型的推理端点。个人凭据和项目权限已实现，但本版本仍不适合公开接受不受信任客户。需要企业 SSO、独立作业沙箱和网关限流后再扩大边界。
+Caddy 负责 TLS 和反向代理。域名发布须启用上面的凭据模式并签发个人凭据，8000 保持 loopback 绑定；默认个人模式会拒绝任意公网域名。该方式发布的是训练控制台，不是已训练模型的推理端点。个人凭据和项目权限已实现，但本版本仍不适合公开接受不受信任客户。需要企业 SSO、独立作业沙箱和网关限流后再扩大边界。
 
 ## 6 第一次验收
 

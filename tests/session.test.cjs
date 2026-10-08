@@ -35,3 +35,17 @@ test('test view survives reload, is isolated by identity, and clears on logout',
  b.run("selectedJob=null;restoreView({subject:'another-user'})");assert.equal(b.run('selectedJob'),null);
  b.run("restoreView({subject:'test'});disconnected()");assert.equal(b.store.size,0);
 });
+
+test('local mode enters automatically without sending or retaining credentials',async()=>{
+ const calls=[];const b=browser(async(path,options)=>{calls.push({path,options});return {...response(),json:async()=>path==='/api/health'?{service:'trainlab-pretraining',auth_required:false,auth_mode:'local'}:{identity:{subject:'local-owner',project:'research',role:'admin'}}};});
+ b.run("saveCredential('obsolete-personal-key')");await b.run('check()');
+ assert.equal(b.run('connected'),true);assert.equal(b.run('token'),'');assert.equal(b.run('savedCredential()'),'');
+ assert.equal(b.elements.get('#login').hidden,true);assert.equal(b.elements.get('#logout').hidden,true);
+ assert.equal(calls.find(c=>c.path==='/api/system').options.headers.Authorization,undefined);
+});
+test('local mode works with storage blocked and reports access failures without a login form',async()=>{
+ const b=browser(async(path)=>({...response(path==='/api/system'?403:200),json:async()=>path==='/api/health'?{service:'trainlab-pretraining',auth_required:false}:{detail:'local access denied'}}),true);
+ await b.run('check()');assert.equal(b.run('connected'),false);assert.equal(b.elements.get('#login').hidden,true);assert.equal(b.elements.get('#offline').hidden,false);assert.match(b.elements.get('#error-text').textContent,/local access denied/);
+ const good=browser(async(path)=>({...response(),json:async()=>path==='/api/health'?{service:'trainlab-pretraining',auth_required:false}:{identity:{subject:'local-owner'}}}),true);
+ await good.run('check()');assert.equal(good.run('connected'),true);assert.equal(good.store.size,0);assert.equal(good.elements.has('#toast'),false);
+});

@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from server.manager import Manager, ROOT, gpu_inventory, now
 from server.schema import TrainConfig, CatalogImport, ModelTestConfig, SchedulerControl
 from server.catalog import CATALOG, collect, CatalogError, MAX_OUTPUT
-from server.security import AuthStore, Principal
+from server.security import AuthStore, Principal, LocalAccess
 from server.architectures import ARCHITECTURES
 from server.posttraining import record_format, MODEL_FIELDS, inherited_config
 
@@ -36,9 +36,12 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
     state = Path(state_dir or os.environ.get('TRAINLAB_STATE_DIR', ROOT/'state'))
     production = os.environ.get('TRAINLAB_ENV', 'development') == 'production'
     if production and secret:
-        raise RuntimeError('Production requires individual credentials. Remove TRAINLAB_API_TOKEN and use scripts.users.')
+        raise RuntimeError('Remove TRAINLAB_API_TOKEN in production; use local access or individual credentials via scripts.users.')
     if secret and len(secret) < 32:
         raise RuntimeError('Development token must contain at least 32 characters.')
+    auth_mode=os.environ.get('TRAINLAB_AUTH_MODE','credentials')
+    if auth_mode not in ('credentials','local'):raise RuntimeError('TRAINLAB_AUTH_MODE must be credentials or local')
+    local_access=LocalAccess(os.environ.get('TRAINLAB_LOCAL_HOSTS','localhost,127.0.0.1,::1'),os.environ.get('TRAINLAB_LOCAL_NETWORKS','127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16')) if auth_mode=='local' else None
     manager = Manager(state)
     identities = AuthStore(manager)
     upload_slots = threading.BoundedSemaphore(2)
@@ -101,7 +104,9 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
 
     def auth(request: Request, authorization: str = Header(default='')):
         raw = authorization[7:] if authorization.startswith('Bearer ') else ''
-        if secret and hmac.compare_digest(raw.encode(),secret.encode()):
+        if local_access:
+            principal=local_access.require(request)
+        elif secret and hmac.compare_digest(raw.encode(),secret.encode()):
             principal = Principal('development-admin','admin','default')
         else:
             principal = identities.authenticate(raw)
@@ -123,7 +128,7 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
 
     @app.get('/api/health')
     def health():
-        return {'service':'trainlab-pretraining','version':6,'auth_required':True}
+        return {'service':'trainlab-pretraining','version':6,'auth_required':auth_mode!='local','auth_mode':auth_mode}
 
     @app.get('/api/ready')
     def ready():
@@ -167,7 +172,7 @@ def create_app(state_dir=None, token=None, start_scheduler=True):
         return {**gpu_inventory(), 'scheduler':'single_job_queue', 'max_upload_mib':100,
                 'backend':'Qwen3.5 / Qwen3 / GPT-2 from scratch + byte-level BPE + PyTorch DDP',
                 'active_job_id':manager.active_id if manager.active_kind=='jobs' and identities.allowed(p,'job',manager.active_id) else None,
-                'identity':{'subject':p.subject,'role':p.role,'project':p.project},
+                'auth_mode':auth_mode,'identity':{'subject':p.subject,'role':p.role,'project':p.project},
                 'limits':{'max_pending_jobs':manager.max_pending,'min_free_bytes':manager.min_free_bytes,'max_log_bytes':manager.max_log_bytes,'gpu_idle_mib':manager.gpu_idle_mib},
                 'control':manager.control(),'blocked_reason':manager.blocked_reason,'scheduler_error':manager.scheduler_error,
                 'worker_kind':manager.active_kind,'execution_blocked':manager.active_id is None and not manager.lease_available(),

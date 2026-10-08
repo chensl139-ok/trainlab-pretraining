@@ -10,7 +10,7 @@ let refreshing=false,submitting=false,mutating=false,uploading=false,uploadReque
 let offset=0,total=0,pageSize=12,listRevision=0,detailRevision=0,activeTab='metrics',pendingSubmission=null,dialogAction=null,dialogBusy=false,refreshQueued=false;
 let baseModels=[];
 let testSubmitting=false,testRevision=0,selectedTest=null,testItems=[],pendingTest=null,testError='',testDetails=null,restoredTest=null,testBindingError='';
-let viewStorageKey='';
+let viewStorageKey='',accessMode='credentials';
 const requests=new Set();let toastTimer,searchTimer;
 const credentialKey='trainlab-tab-credential-v1';
 function savedCredential(){try{return sessionStorage.getItem(credentialKey)||'';}catch{return '';}}
@@ -34,7 +34,7 @@ function staleError(){const e=new Error('连接已变更');e.stale=true;return e
 async function api(path,options={}){
   const version=session,controller=new AbortController();requests.add(controller);const timeout=setTimeout(()=>controller.abort(),options.timeoutMs||20000);
   try{
-    const response=await fetch('/api'+path,{...options,signal:controller.signal,headers:{Authorization:'Bearer '+token,...options.headers}});
+    const response=await fetch('/api'+path,{...options,signal:controller.signal,headers:{...(token?{Authorization:'Bearer '+token}:{}),...options.headers}});
     if(version!==session)throw staleError();
     if(response.status===401){disconnected('凭据已过期或被吊销，请重新连接');throw new Error('访问凭据无效，请重新连接');}
     if(options.raw){if(!response.ok)throw new Error('下载失败，请刷新后重试');return response;}
@@ -47,22 +47,25 @@ async function api(path,options={}){
 }
 async function check(){
   $('#retry-connection').disabled=true;$('#offline').hidden=true;$('#notice').textContent='正在检查训练服务…';
-  try{const r=await fetch('/api/health',{signal:AbortSignal.timeout(8000)}),health=await r.json();if(!r.ok||health.service!=='trainlab-pretraining')throw new Error();$('#login').hidden=false;$('#connection').textContent='服务在线 · 待认证';$('#notice').textContent='训练服务可连接。输入个人凭据后查看机器资源与实验。';const saved=savedCredential();if(saved)await connect(saved,true);}
+  try{const r=await fetch('/api/health',{signal:AbortSignal.timeout(8000)}),health=await r.json();if(!r.ok||health.service!=='trainlab-pretraining')throw new Error();accessMode=health.auth_required===false?'local':'credentials';
+    if(accessMode==='local'){clearCredential();$('#login').hidden=true;$('#notice').textContent='正在打开个人工作台…';await connect('');}
+    else{$('#login').hidden=false;$('#connection').textContent='服务在线 · 待认证';$('#notice').textContent='训练服务可连接。输入个人凭据后查看机器资源与实验。';const saved=savedCredential();if(saved)await connect(saved,true);}}
+
   catch{$('#login').hidden=true;$('#offline').hidden=false;$('#connection').textContent='未连接 GPU 机器';$('#notice').textContent='当前未连接训练后端。请部署到 Linux 机器，或检查服务器与 SSH 隧道。';}
   finally{$('#retry-connection').disabled=false;}
 }
 async function connect(credential,restoring=false){
   if($('#login-button').disabled)return;session++;const version=session;token=credential;$('#login-button').disabled=true;$('#login-button').textContent=restoring?'恢复连接中…':'连接中…';clearError();
   if(restoring)$('#notice').textContent='正在恢复当前标签页的登录状态…';
-  try{const data=await api('/system');if(version!==session)return;connected=true;const remembered=saveCredential(token);$('#token').value='';$('#login').hidden=true;$('#offline').hidden=true;$('#console').hidden=false;$('#logout').hidden=false;$('#refresh').hidden=false;restoreView(data.identity);paintSystem(data,true);offset=0;await refresh();changeTab(activeTab);if(!remembered&&connected)toast('浏览器禁止会话存储，本次连接有效，刷新后需要重新输入凭据');}
-  catch(error){if(!error.stale){if(version===session){token='';connected=false;}showError(error);if(restoring&&savedCredential())$('#notice').textContent='暂时无法恢复连接，已保留本标签页凭据；请检查网络后刷新重试。';}}
+  try{const data=await api('/system');if(version!==session)return;connected=true;const remembered=accessMode==='local'||saveCredential(token);$('#token').value='';$('#login').hidden=true;$('#offline').hidden=true;$('#console').hidden=false;$('#logout').hidden=accessMode==='local';$('#refresh').hidden=false;restoreView(data.identity);paintSystem(data,true);offset=0;await refresh();changeTab(activeTab);if(!remembered&&connected)toast('浏览器禁止会话存储，本次连接有效，刷新后需要重新输入凭据');}
+  catch(error){if(!error.stale){if(version===session){token='';connected=false;}showError(error);if(accessMode==='local'){$('#login').hidden=true;$('#offline').hidden=false;$('#connection').textContent='个人工作台暂不可用';}if(restoring&&savedCredential())$('#notice').textContent='暂时无法恢复连接，已保留本标签页凭据；请检查网络后刷新重试。';}}
   finally{$('#login-button').disabled=false;$('#login-button').textContent='连接训练服务 →';}
 }
 $('#login').onsubmit=event=>{event.preventDefault();connect($('#token').value.trim());};
 function paintSystem(data,initial=false){
   system=data;canWrite=['admin','operator'].includes(data.identity?.role);const identity=data.identity;
-  $('#connection').textContent=identity?`${identity.subject} · ${identity.role==='viewer'?'只读':identity.project}`:'已连接';
-  $('#notice').classList.remove('stale');$('#notice').textContent=`${data.control?.paused?'维护模式':data.blocked_reason||data.execution_blocked?'等待资源 / 检查':data.scheduler_alive?'调度器运行中':'调度器未就绪'} · ${data.control?.paused?'已停止新任务接收':!canWrite?'只读访问':data.gpus?.length?'可提交任务':'等待 GPU 就绪'} · 单机串行 DDP · 数据保留在服务器`;
+  $('#connection').textContent=accessMode==='local'?'个人模式 · 免凭据':identity?`${identity.subject} · ${identity.role==='viewer'?'只读':identity.project}`:'已连接';
+  $('#notice').classList.remove('stale');$('#notice').textContent=`${data.control?.paused?'维护模式':data.blocked_reason||data.execution_blocked?'等待资源 / 检查':data.scheduler_alive?'调度器运行中':'调度器未就绪'} · ${data.control?.paused?'已停止新任务接收':!canWrite?'只读访问':data.gpus?.length?'可提交任务':'等待 GPU 就绪'} · ${accessMode==='local'?'个人模式免凭据 · ':''}单机串行 DDP · 数据保留在服务器`;
   const gpus=data.gpus||[];$('#gpu-description').textContent=gpus.length?`${gpus.length} 张 GPU 在线`:'未检测到 GPU';
   $('#gpu-cards').innerHTML=gpus.length?gpus.map(g=>`<article class="gpu-card"><div class="gpu-top"><strong>GPU ${g.index}</strong><span>${number(g.utilization_percent)}% 利用率</span></div><p title="${esc(g.name)}">${esc(g.name)}</p><div class="vram">${(g.memory_used_mib/1024).toFixed(1)} <small>/ ${(g.memory_total_mib/1024).toFixed(1)} GiB</small></div><div class="progress-track"><div style="width:${Math.min(100,g.memory_used_mib/g.memory_total_mib*100)}%"></div></div><p>驱动 ${esc(g.driver)}</p></article>`).join(''):'<div class="gpu-empty"><span aria-hidden="true">▥</span><div><b>尚无可用的 NVIDIA GPU</b><p>可以准备语料和配置；提交训练前请检查驱动与容器 GPU 挂载。</p></div></div>';
   const previous=all('[name=gpu]:checked').map(x=>+x.value),newIds=gpus.map(g=>g.index).join(',');
@@ -131,7 +134,7 @@ $('#upload').onclick=async()=>{
   if(uploading||!canWrite||!selectedFile)return;if(selectedFile.size>100*1024**2||!selectedFile.size){showError('请选择非空且不超过 100 MiB 的语料文件');return;}
   const version=session;uploading=true;clearError();updateForm();$('#cancel-upload').hidden=false;$('#upload-progress').hidden=false;$('#upload-progress').value=0;$('#upload-state').textContent='正在上传…';
   try{
-    const data=await new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();uploadRequest=xhr;xhr.open('POST','/api/datasets?name='+encodeURIComponent(selectedFile.name));xhr.setRequestHeader('Authorization','Bearer '+token);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.timeout=180000;
+    const data=await new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();uploadRequest=xhr;xhr.open('POST','/api/datasets?name='+encodeURIComponent(selectedFile.name));if(token)xhr.setRequestHeader('Authorization','Bearer '+token);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.timeout=180000;
       xhr.upload.onprogress=e=>{if(version!==session)return;if(e.lengthComputable){const percent=Math.round(e.loaded/e.total*100);$('#upload-progress').value=percent;$('#upload-state').textContent=percent===100?'传输完成，正在校验语料…':`正在上传 ${percent}%`;}};
       xhr.onload=()=>{if(version!==session)return reject(staleError());let result;try{result=JSON.parse(xhr.responseText);}catch{return reject(new Error('上传服务响应异常'));}if(xhr.status===401){disconnected('凭据已失效，请重新连接');return reject(new Error('访问凭据无效'));}xhr.status>=200&&xhr.status<300?resolve(result):reject(new Error(typeof result.detail==='string'?result.detail:'语料校验失败'));};
       xhr.onerror=()=>reject(new Error('上传连接失败，请刷新核对语料是否已保存'));xhr.ontimeout=()=>reject(new Error('上传超时，请刷新核对是否已保存后重试'));xhr.onabort=()=>reject(new Error('上传已取消；若服务器已保存，可在数据集列表核对'));xhr.send(selectedFile);

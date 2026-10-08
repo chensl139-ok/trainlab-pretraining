@@ -8,6 +8,7 @@ services:
     env_file: .env
     environment:
       TRAINLAB_ENV: production
+      TRAINLAB_AUTH_MODE: ${TRAINLAB_AUTH_MODE:-local}
       TRAINLAB_STATE_DIR: /state
       TRAINLAB_MAX_PENDING_JOBS: ${TRAINLAB_MAX_PENDING_JOBS:-20}
       TRAINLAB_MIN_FREE_BYTES: ${TRAINLAB_MIN_FREE_BYTES:-5368709120}

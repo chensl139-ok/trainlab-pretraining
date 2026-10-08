@@ -2,7 +2,7 @@
 
 支持 ModelScope Qwen3 本地基座导入、SFT 指令微调和 DPO 偏好优化（全参数），以及训练后的指令回答与语料评估。见 [后训练操作指南](POSTTRAINING.md)。
 
-面向个人生产试运行的单机 NVIDIA GPU 文本预训练、模型验证与运维工作台。
+面向个人生产试运行的单机 NVIDIA GPU 文本预训练、模型验证与运维工作台。默认个人免凭据模式：通过本机或 SSH 隧道打开页面即可使用，无需签发或粘贴个人凭据。
 
 - `/`：默认进入训练工作台；学习实验仍可通过侧栏「学习与参考」进入。
 - `/gpu.html`：从随机初始化 Qwen3.5 / Qwen3 / GPT-2 开始的服务端训练。上传 JSONL、训练 BPE tokenizer、选择 1–8 张 GPU、监控、取消、恢复和下载模型。
@@ -56,7 +56,7 @@ CPU 测试限权重 400 MiB 以内；GPU 测试单卡执行。测试限时 30–
 
 学习页与 GPU 页使用一致的导航名称和顺序，按服务器训练、浏览器学习实验、学习资料分组。当前页重复点击不会重置或刷新；教学模块切换支持浏览器返回/前进，知识库章节可直接链接。微调练习参数在同一页面内切换后保留。手机端使用带文字的抽屉导航，支持 Esc、遮罩关闭和键盘焦点约束。
 
-跨到 GPU 页面或离开 GPU 页面仍属于整页导航；GPU 凭据保存在当前标签页 sessionStorage，刷新或同标签页返回会验证并恢复连接；断开连接或凭据失效时清除，服务端训练不受影响。部署和运维资料在新标签页打开。
+跨到 GPU 页面或离开 GPU 页面仍属于整页导航；凭据模式的 GPU 凭据保存在当前标签页 sessionStorage，刷新或同标签页返回会验证并恢复连接；断开连接或凭据失效时清除，服务端训练不受影响。部署和运维资料在新标签页打开。
 
 ## v4 工作台更新
 
@@ -85,17 +85,16 @@ python3 scripts/init_env.py
 docker compose -f compose.image.yaml pull
 docker compose -f compose.image.yaml run --rm trainlab python scripts/preflight.py
 docker compose -f compose.image.yaml run --rm trainlab torchrun --standalone --nproc_per_node=8 scripts/ddp_check.py
-docker compose -f compose.image.yaml run --rm trainlab python -m scripts.users issue --subject admin --project research --role admin --credential-file /state/credentials/admin.key
 docker compose -f compose.image.yaml up -d
 ```
 
-已有部署保留原 `.env`、项目目录及 `trainlab-state` 数据卷；不要重复签发同名凭据文件，也不要用 `down -v` 删除数据。升级前停机备份，再 `pull` 和 `up -d`。`compose.image.yaml` 与源码构建版的服务、卷名相同，请在同一项目目录执行并保持原 Compose 项目名。可以在 `.env` 设置 `TRAINLAB_IMAGE=ghcr.io/chensl139-ok/trainlab-pretraining@sha256:实际摘要`。
+已有部署保留原 `.env`、项目目录及 `trainlab-state` 数据卷；新版 Compose 默认 `TRAINLAB_AUTH_MODE=local`，通过本机或 SSH 隧道进入即可；不要用 `down -v` 删除数据。升级前停机备份，再 `pull` 和 `up -d`。`compose.image.yaml` 与源码构建版的服务、卷名相同，请在同一项目目录执行并保持原 Compose 项目名。可以在 `.env` 设置 `TRAINLAB_IMAGE=ghcr.io/chensl139-ok/trainlab-pretraining@sha256:实际摘要`。
 
 [GHCR 镜像包](https://github.com/chensl139-ok/trainlab-pretraining/pkgs/container/trainlab-pretraining) 已公开，已验证匿名读取镜像 manifest，无需 GitHub 登录即可拉取。首次镜像压缩层合计约 3.14 GB；服务器还需预留解压、镜像更新及训练数据空间。发布摘要与验证记录见 [VALIDATION.md](VALIDATION.md)。
 
 ## 在服务器从源码部署
 
-这是公开仓库，服务器可直接通过 HTTPS 克隆，无需 GitHub 登录。训练服务仍需要个人凭据；公开源码不会开放服务器上的语料、模型或任务。
+这是公开仓库，服务器可直接通过 HTTPS 克隆，无需 GitHub 登录。个人模式只接受本机或明确配置的内网入口；公开源码不会开放服务器上的语料、模型或任务。
 
 ```bash
 git clone https://github.com/chensl139-ok/trainlab-pretraining.git
@@ -109,7 +108,6 @@ python3 scripts/init_env.py
 docker compose build
 docker compose run --rm trainlab python scripts/preflight.py
 docker compose run --rm trainlab torchrun --standalone --nproc_per_node=8 scripts/ddp_check.py
-docker compose run --rm trainlab python -m scripts.users issue --subject admin --project research --role admin --credential-file /state/credentials/admin.key
 docker compose up -d
 ```
 
@@ -119,9 +117,17 @@ docker compose up -d
 ssh -N -L 8000:127.0.0.1:8000 your-user@your-server
 ```
 
-打开 `http://127.0.0.1:8000/gpu.html`，输入服务器 `/state/credentials/admin.key` 文件中的个人凭据。凭据只在服务器上生成，本仓库不包含任何部署凭据或业务训练数据；合成示例语料仅供流程测试。
+打开 `http://127.0.0.1:8000/gpu.html`，页面会自动进入个人工作台，无需输入凭据。旧任务、语料、模型、维护状态与审计记录保留。合成示例语料仅供流程测试。
 
 第一次先单卡跑通短训练和检查点恢复，再扩到八卡。完整的鉴权、备份、HTTPS、升级与故障处理见部署手册。升级前先备份；`git pull --ff-only` 只更新源码，镜像需重新构建后生效。不要执行 `docker compose down -v`，它会删除训练数据卷。
+
+## 个人免凭据访问
+
+源码与镜像 Compose 默认 `TRAINLAB_AUTH_MODE=local`，端口仍绑定 `127.0.0.1`。浏览器自动连接，旧的浏览器凭据会清除；不生成或保存新访问令牌。所有操作记为 `local-owner` 管理员，可访问已有项目的训练数据和任务。
+
+远程个人电脑使用上面的 SSH 隧道。在明确受信任的公司内网使用 IP 时，可设置 `.env` 中的 `TRAINLAB_BIND=服务器内网IP`、`TRAINLAB_LOCAL_HOSTS=localhost,127.0.0.1,服务器内网IP`，服务只允许私有网段来源和指定 Host，拒绝跨站请求。能访问该入口的内网用户拥有相同管理权限。
+
+公网域名发布或需要多人独立权限时，设置 `TRAINLAB_AUTH_MODE=credentials`，使用部署手册的凭据签发流程。个人免凭据模式不会自动放行公网来源或任意域名。直接运行 Python API（未使用 Compose）仍默认凭据模式，免凭据模式需显式设置环境变量。
 
 ## 验证与状态
 
